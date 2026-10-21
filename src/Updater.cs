@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -118,7 +119,7 @@ namespace GhostDesk
             }
         }
 
-        public static void Launch(string zipPath)
+        public static void Launch(string zipPath, int processId)
         {
             if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
             {
@@ -127,7 +128,7 @@ namespace GhostDesk
 
             string exePath = System.Reflection.Assembly.GetEntryAssembly().Location;
             string installDirectory = Path.GetDirectoryName(exePath);
-            string scriptPath = CreateUpdaterScript(zipPath, installDirectory, exePath);
+            string scriptPath = CreateUpdaterScript();
 
             string systemDirectory =
                 Environment.GetFolderPath(Environment.SpecialFolder.System);
@@ -146,7 +147,8 @@ namespace GhostDesk
                 Quote(scriptPath) +
                 " -ZipPath " + Quote(zipPath) +
                 " -InstallDir " + Quote(installDirectory) +
-                " -ExePath " + Quote(exePath);
+                " -ExePath " + Quote(exePath) +
+                " -ProcessId " + processId.ToString(CultureInfo.InvariantCulture);
 
             Process.Start(new ProcessStartInfo
             {
@@ -158,10 +160,7 @@ namespace GhostDesk
             });
         }
 
-        private static string CreateUpdaterScript(
-            string zipPath,
-            string installDirectory,
-            string exePath)
+        private static string CreateUpdaterScript()
         {
             string scriptPath = Path.Combine(
                 Path.GetTempPath(),
@@ -171,27 +170,101 @@ namespace GhostDesk
 param(
     [string]$ZipPath,
     [string]$InstallDir,
-    [string]$ExePath
+    [string]$ExePath,
+    [int]$ProcessId
 )
 
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $env:TEMP 'GhostDesk-update.log'
-Start-Sleep -Seconds 2
 
-try {
+function Write-UpdaterLog {
+    param([string]$Message)
+
+    try {
+        $line = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') + '] ' + $Message
+        Add-Content -LiteralPath $log -Value $line -Encoding UTF8
+    } catch {
+    }
+}
+
+function Wait-ForProcessExit {
+    param(
+        [int]$TargetProcessId,
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $process = Get-Process -Id $TargetProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $process) {
+            return $true
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+
+    return $false
+}
+
+function Stop-TargetInstallProcesses {
+    param(
+        [string]$TargetExePath
+    )
+
     $processes = Get-Process -Name 'GhostDesk' -ErrorAction SilentlyContinue
     foreach ($process in $processes) {
         try {
-            Stop-Process -Id $process.Id -Force
+            if ([string]::Equals(
+                [string]$process.Path,
+                $TargetExePath,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+                Stop-Process -Id $process.Id -Force
+            }
         } catch {
         }
     }
+}
 
-    Start-Sleep -Seconds 1
+function Move-FileWithRetry {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [int]$TimeoutSeconds
+    )
 
-    $backup = Join-Path $InstallDir ('GhostDesk.exe.bak-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))
-    if (Test-Path -LiteralPath $ExePath) {
-        Copy-Item -LiteralPath $ExePath -Destination $backup -Force
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastError = $null
+    while ((Get-Date) -lt $deadline) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination -Force
+            return
+        } catch {
+            $lastError = $_
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    if ($null -ne $lastError) {
+        throw $lastError
+    }
+
+    throw 'Timed out while moving files.'
+}
+
+$updateSucceeded = $false
+$staging = $null
+$backup = $null
+$newExe = $null
+
+try {
+    Write-UpdaterLog ('Updater started. Current PID=' + $ProcessId + '; target=' + $ExePath)
+
+    if (-not (Test-Path -LiteralPath $ZipPath)) {
+        throw 'Update package does not exist.'
+    }
+
+    if (-not (Test-Path -LiteralPath $ExePath)) {
+        throw 'Installed executable does not exist.'
     }
 
     $staging = Join-Path $env:TEMP ('GhostDesk-update-' + [guid]::NewGuid().ToString('N'))
@@ -200,31 +273,116 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $staging)
 
-    Copy-Item -LiteralPath (Join-Path $staging 'GhostDesk.exe') -Destination $ExePath -Force
-
-    $readme = Join-Path $staging 'README.md'
-    if (Test-Path -LiteralPath $readme) {
-        Copy-Item -LiteralPath $readme -Destination (Join-Path $InstallDir 'README.md') -Force
+    $stagedExe = Join-Path $staging 'GhostDesk.exe'
+    if (-not (Test-Path -LiteralPath $stagedExe)) {
+        $foundExe = Get-ChildItem -LiteralPath $staging -Filter 'GhostDesk.exe' -Recurse |
+            Select-Object -First 1
+        if ($null -ne $foundExe) {
+            $stagedExe = $foundExe.FullName
+        }
     }
 
-    Remove-Item -LiteralPath $staging -Recurse -Force
-
-    Start-Sleep -Seconds 1
-    Start-Process -FilePath $ExePath
-    Start-Sleep -Seconds 1
-
-    if (Test-Path -LiteralPath $ZipPath) {
-        Remove-Item -LiteralPath $ZipPath -Force
+    if (-not (Test-Path -LiteralPath $stagedExe)) {
+        throw 'GhostDesk.exe was not found in the update package.'
     }
 
-    Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
+    if ((Get-Item -LiteralPath $stagedExe).Length -lt 4096) {
+        throw 'GhostDesk.exe in the update package is invalid.'
+    }
+
+    Write-UpdaterLog 'Update package extracted successfully.'
+
+    if (-not (Wait-ForProcessExit -TargetProcessId $ProcessId -TimeoutSeconds 30)) {
+        Write-UpdaterLog 'GhostDesk did not exit in time. Stopping the target process.'
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+        if (-not (Wait-ForProcessExit -TargetProcessId $ProcessId -TimeoutSeconds 10)) {
+            throw 'GhostDesk process did not exit.'
+        }
+    }
+
+    Stop-TargetInstallProcesses -TargetExePath $ExePath
+    Start-Sleep -Milliseconds 300
+
+    $backup = Join-Path $InstallDir (
+        'GhostDesk.exe.bak-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+    $newExe = Join-Path $InstallDir (
+        'GhostDesk.exe.new-' + [guid]::NewGuid().ToString('N'))
+
+    Copy-Item -LiteralPath $stagedExe -Destination $newExe -Force
+    if ((Get-Item -LiteralPath $newExe).Length -ne (Get-Item -LiteralPath $stagedExe).Length) {
+        throw 'Copied GhostDesk.exe is incomplete.'
+    }
+
+    Move-FileWithRetry -Source $ExePath -Destination $backup -TimeoutSeconds 30
+    Write-UpdaterLog ('Old executable moved to backup: ' + $backup)
+
+    try {
+        Move-Item -LiteralPath $newExe -Destination $ExePath -Force
+        Write-UpdaterLog ('New executable installed: ' + $ExePath)
+
+        $readme = Join-Path $staging 'README.md'
+        if (Test-Path -LiteralPath $readme) {
+            try {
+                Copy-Item -LiteralPath $readme -Destination (Join-Path $InstallDir 'README.md') -Force
+            } catch {
+                Write-UpdaterLog ('README update skipped: ' + $_.Exception.Message)
+            }
+        }
+
+        $updateSucceeded = $true
+    } catch {
+        try {
+            if (Test-Path -LiteralPath $ExePath) {
+                Remove-Item -LiteralPath $ExePath -Force
+            }
+            if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $ExePath)) {
+                Move-Item -LiteralPath $backup -Destination $ExePath -Force
+            }
+        } catch {
+            Write-UpdaterLog ('Rollback failed: ' + $_.Exception.ToString())
+        }
+
+        throw
+    }
 }
 catch {
+    Write-UpdaterLog ('Update failed: ' + $_.Exception.ToString())
+}
+finally {
     try {
-        Add-Content -LiteralPath $log -Value ($_.Exception.ToString())
+        if (Test-Path -LiteralPath $newExe) {
+            Remove-Item -LiteralPath $newExe -Force
+        }
     } catch {
     }
-    exit 1
+
+    try {
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
+        }
+    } catch {
+    }
+
+    try {
+        if ($updateSucceeded -and (Test-Path -LiteralPath $ZipPath)) {
+            Remove-Item -LiteralPath $ZipPath -Force
+        }
+    } catch {
+    }
+
+    if (Test-Path -LiteralPath $ExePath) {
+        try {
+            Start-Process -FilePath $ExePath -WorkingDirectory $InstallDir
+            Write-UpdaterLog ('GhostDesk restarted: ' + $ExePath)
+        } catch {
+            Write-UpdaterLog ('GhostDesk restart failed: ' + $_.Exception.ToString())
+        }
+    }
+
+    try {
+        Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
+    } catch {
+    }
 }
 ";
 

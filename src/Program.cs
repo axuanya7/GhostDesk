@@ -301,7 +301,11 @@ namespace GhostDesk
 
                             if (string.IsNullOrEmpty(error))
                             {
-                                CloseApplication();
+                                System.Windows.Application.Current.Dispatcher.BeginInvoke(
+                                    new Action(delegate
+                                    {
+                                        CloseApplication();
+                                    }));
                             }
                             else
                             {
@@ -355,7 +359,7 @@ namespace GhostDesk
                 try
                 {
                     SaveConfig();
-                    Updater.Launch(zipPath);
+                    Updater.Launch(zipPath, Process.GetCurrentProcess().Id);
                 }
                 catch (Exception ex)
                 {
