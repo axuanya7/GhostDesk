@@ -1,0 +1,10 @@
+bin/
+dist/
+qa/
+.vs/
+*.suo
+*.user
+*.log
+*.bak
+*.bak-*
+
