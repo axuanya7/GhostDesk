@@ -18,6 +18,9 @@ namespace GhostDesk
         public string Path { get; set; }
 
         [DataMember]
+        public string OriginalPath { get; set; }
+
+        [DataMember]
         public string Name { get; set; }
 
         [DataMember]
@@ -28,6 +31,65 @@ namespace GhostDesk
 
         [DataMember]
         public bool ExternalReference { get; set; }
+
+        [DataMember]
+        public bool HiddenByGhostDesk { get; set; }
+
+        [DataMember]
+        public bool? HiddenBeforeGhostDesk { get; set; }
+    }
+
+    [DataContract]
+    public class ScheduledTaskConfig
+    {
+        public const string TypeApplication = "application";
+        public const string TypeFile = "file";
+        public const string TypeUrl = "url";
+        public const string TypeShutdown = "shutdown";
+
+        public const string ModeOnce = "once";
+        public const string ModeDaily = "daily";
+        public const string ModeWeekly = "weekly";
+        public const string ModeInterval = "interval";
+
+        [DataMember]
+        public string Id { get; set; }
+
+        [DataMember]
+        public string Name { get; set; }
+
+        [DataMember]
+        public string TaskType { get; set; }
+
+        [DataMember]
+        public string Target { get; set; }
+
+        [DataMember]
+        public string ScheduleMode { get; set; }
+
+        [DataMember]
+        public string Time { get; set; }
+
+        [DataMember]
+        public int DayOfWeek { get; set; }
+
+        [DataMember]
+        public int IntervalMinutes { get; set; }
+
+        [DataMember]
+        public int CountdownSeconds { get; set; }
+
+        [DataMember]
+        public bool Enabled { get; set; }
+
+        [DataMember]
+        public string CreatedUtc { get; set; }
+
+        [DataMember]
+        public string FirstRunUtc { get; set; }
+
+        [DataMember]
+        public string LastRunUtc { get; set; }
     }
 
     [DataContract]
@@ -114,7 +176,21 @@ namespace GhostDesk
         public int LaunchIntervalMs { get; set; }
 
         [DataMember]
+        public List<ScheduledTaskConfig> ScheduledTasks { get; set; }
+
+        [DataMember]
         public bool AutoStart { get; set; }
+
+        [DataMember]
+        public bool ShowHiddenFiles { get; set; }
+
+        /// <summary>开启「显示隐藏文件」前，注册表 Explorer\Advanced\Hidden 的原值（1=显示,2=不显示）。</summary>
+        [DataMember]
+        public int? ExplorerHiddenOriginal { get; set; }
+
+        /// <summary>配置文件结构版本，用于识别旧版本升级并执行迁移。</summary>
+        [DataMember]
+        public int? ConfigVersion { get; set; }
 
         [DataMember]
         public bool PauseInFullscreen { get; set; }
@@ -162,6 +238,8 @@ namespace GhostDesk
 
         public static bool IsFirstRun { get; private set; }
 
+        public static Exception LastSaveError { get; private set; }
+
         public static string ConfigPath
         {
             get
@@ -201,6 +279,19 @@ namespace GhostDesk
 
         private static string ResolveDataDirectory()
         {
+            string overrideDirectory =
+                Environment.GetEnvironmentVariable("GHOSTDESK_DATA_DIR");
+            if (!string.IsNullOrWhiteSpace(overrideDirectory))
+            {
+                try
+                {
+                    return Path.GetFullPath(overrideDirectory.Trim());
+                }
+                catch
+                {
+                }
+            }
+
             string roaming = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "GhostDesk");
@@ -315,116 +406,161 @@ namespace GhostDesk
             }
         }
 
-        public static void Save(AppConfig config)
+        public static bool Save(AppConfig config)
         {
-            Normalize(config);
-            string dir = Path.GetDirectoryName(ConfigPath);
-            if (!Directory.Exists(dir))
+            LastSaveError = null;
+            try
             {
-                Directory.CreateDirectory(dir);
+                Normalize(config);
+                string dir = Path.GetDirectoryName(ConfigPath);
+                if (!Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("{");
+                sb.AppendLine("  \"IdleSeconds\": " + Inv(config.IdleSeconds) + ",");
+                sb.AppendLine("  \"FadeSeconds\": " + Inv(config.FadeSeconds) + ",");
+                sb.AppendLine("  \"LaunchIntervalMs\": " + config.LaunchIntervalMs.ToString(CultureInfo.InvariantCulture) + ",");
+                sb.AppendLine("  \"ScheduledTasks\": [");
+                for (int i = 0; i < config.ScheduledTasks.Count; i++)
+                {
+                    ScheduledTaskConfig task = config.ScheduledTasks[i];
+                    sb.AppendLine("    {");
+                    sb.AppendLine("      \"Id\": \"" + Escape(task.Id) + "\",");
+                    sb.AppendLine("      \"Name\": \"" + Escape(task.Name) + "\",");
+                    sb.AppendLine("      \"TaskType\": \"" + Escape(task.TaskType) + "\",");
+                    sb.AppendLine("      \"Target\": \"" + Escape(task.Target) + "\",");
+                    sb.AppendLine("      \"ScheduleMode\": \"" + Escape(task.ScheduleMode) + "\",");
+                    sb.AppendLine("      \"Time\": \"" + Escape(task.Time) + "\",");
+                    sb.AppendLine("      \"DayOfWeek\": " + task.DayOfWeek.ToString(CultureInfo.InvariantCulture) + ",");
+                    sb.AppendLine("      \"IntervalMinutes\": " + task.IntervalMinutes.ToString(CultureInfo.InvariantCulture) + ",");
+                    sb.AppendLine("      \"CountdownSeconds\": " + task.CountdownSeconds.ToString(CultureInfo.InvariantCulture) + ",");
+                    sb.AppendLine("      \"Enabled\": " + (task.Enabled ? "true" : "false") + ",");
+                    sb.AppendLine("      \"CreatedUtc\": \"" + Escape(task.CreatedUtc) + "\",");
+                    sb.AppendLine("      \"FirstRunUtc\": \"" + Escape(task.FirstRunUtc) + "\",");
+                    sb.AppendLine("      \"LastRunUtc\": \"" + Escape(task.LastRunUtc) + "\"");
+                    if (i < config.ScheduledTasks.Count - 1)
+                    {
+                        sb.AppendLine("    },");
+                    }
+                    else
+                    {
+                        sb.AppendLine("    }");
+                    }
+                }
+                sb.AppendLine("  ],");
+                sb.AppendLine("  \"AutoStart\": " + (config.AutoStart ? "true" : "false") + ",");
+                sb.AppendLine("  \"ShowHiddenFiles\": " + (config.ShowHiddenFiles ? "true" : "false") + ",");
+                sb.AppendLine("  \"ExplorerHiddenOriginal\": " + (config.ExplorerHiddenOriginal.HasValue
+                    ? config.ExplorerHiddenOriginal.Value.ToString(CultureInfo.InvariantCulture)
+                    : "null") + ",");
+                sb.AppendLine("  \"ConfigVersion\": " + (config.ConfigVersion.HasValue
+                    ? config.ConfigVersion.Value.ToString(CultureInfo.InvariantCulture)
+                    : "0") + ",");
+                sb.AppendLine("  \"PauseInFullscreen\": " + (config.PauseInFullscreen ? "true" : "false") + ",");
+                sb.AppendLine("  \"BackupIntervalHours\": " + Inv(config.BackupIntervalHours) + ",");
+                sb.AppendLine("  \"BackupMaxCount\": " + config.BackupMaxCount.ToString(CultureInfo.InvariantCulture) + ",");
+                sb.AppendLine("  \"CheckForUpdates\": " + (config.CheckForUpdates != false ? "true" : "false") + ",");
+                sb.AppendLine("  \"LastUpdateCheck\": \"" + Escape(config.LastUpdateCheck) + "\",");
+                sb.AppendLine("  \"SkippedVersion\": \"" + Escape(config.SkippedVersion) + "\",");
+                sb.AppendLine("  \"EnableSnap\": " + (config.EnableSnap == true ? "true" : "false") + ",");
+                sb.AppendLine("  \"EnableAutoReplace\": " + (config.EnableAutoReplace == true ? "true" : "false") + ",");
+                sb.AppendLine("  \"CollapseHoverTrigger\": \"" + Escape(config.CollapseHoverTrigger) + "\",");
+                sb.AppendLine("  \"Mode\": \"" + Escape(config.Mode) + "\",");
+                sb.AppendLine("  \"Regions\": [");
+
+                for (int i = 0; i < config.Regions.Count; i++)
+                {
+                    RegionConfig region = config.Regions[i];
+                    sb.AppendLine("    {");
+                    sb.AppendLine("      \"Id\": \"" + Escape(region.Id) + "\",");
+                    sb.AppendLine("      \"Name\": \"" + Escape(region.Name) + "\",");
+                    sb.AppendLine("      \"X\": " + Inv(region.X) + ",");
+                    sb.AppendLine("      \"Y\": " + Inv(region.Y) + ",");
+                    sb.AppendLine("      \"Width\": " + Inv(region.Width) + ",");
+                    sb.AppendLine("      \"Height\": " + Inv(region.Height) + ",");
+                    sb.AppendLine("      \"DockEdge\": \"" + Escape(region.DockEdge) + "\",");
+                    sb.AppendLine("      \"DockOrder\": " + region.DockOrder.ToString(CultureInfo.InvariantCulture) + ",");
+                    sb.AppendLine("      \"ShowExtensions\": \"" + Escape(region.ShowExtensions) + "\",");
+                    sb.AppendLine("      \"Items\": [");
+
+                    for (int j = 0; j < region.Items.Count; j++)
+                    {
+                        DesktopItem item = region.Items[j];
+                        sb.Append("        { \"Type\": \"" + Escape(item.Type) + "\", ");
+                        sb.Append("\"Path\": \"" + Escape(item.Path) + "\", ");
+                        sb.Append("\"OriginalPath\": \"" + Escape(item.OriginalPath) + "\", ");
+                        sb.Append("\"Name\": \"" + Escape(item.Name) + "\", ");
+                        sb.Append("\"Aliases\": \"" + Escape(item.Aliases) + "\", ");
+                        sb.Append("\"IconPath\": \"" + Escape(item.IconPath) + "\", ");
+                        sb.Append("\"ExternalReference\": " + (item.ExternalReference ? "true" : "false") + ", ");
+                        sb.Append("\"HiddenByGhostDesk\": " + (item.HiddenByGhostDesk ? "true" : "false") + ", ");
+                        sb.Append("\"HiddenBeforeGhostDesk\": " + FormatNullableBool(item.HiddenBeforeGhostDesk) + " }");
+                        if (j < region.Items.Count - 1)
+                        {
+                            sb.Append(",");
+                        }
+                        sb.AppendLine();
+                    }
+
+                    sb.AppendLine("      ],");
+                    sb.AppendLine("      \"LaunchItems\": [");
+
+                    for (int j = 0; j < region.LaunchItems.Count; j++)
+                    {
+                        DesktopItem item = region.LaunchItems[j];
+                        sb.Append("        { \"Type\": \"" + Escape(item.Type) + "\", ");
+                        sb.Append("\"Path\": \"" + Escape(item.Path) + "\", ");
+                        sb.Append("\"OriginalPath\": \"" + Escape(item.OriginalPath) + "\", ");
+                        sb.Append("\"Name\": \"" + Escape(item.Name) + "\", ");
+                        sb.Append("\"Aliases\": \"" + Escape(item.Aliases) + "\", ");
+                        sb.Append("\"IconPath\": \"" + Escape(item.IconPath) + "\", ");
+                        sb.Append("\"ExternalReference\": " + (item.ExternalReference ? "true" : "false") + ", ");
+                        sb.Append("\"HiddenByGhostDesk\": " + (item.HiddenByGhostDesk ? "true" : "false") + ", ");
+                        sb.Append("\"HiddenBeforeGhostDesk\": " + FormatNullableBool(item.HiddenBeforeGhostDesk) + " }");
+                        if (j < region.LaunchItems.Count - 1)
+                        {
+                            sb.Append(",");
+                        }
+                        sb.AppendLine();
+                    }
+
+                    sb.AppendLine("      ]");
+                    if (i < config.Regions.Count - 1)
+                    {
+                        sb.AppendLine("    },");
+                    }
+                    else
+                    {
+                        sb.AppendLine("    }");
+                    }
+                }
+                sb.AppendLine("  ]");
+                sb.AppendLine("}");
+
+                string content = sb.ToString();
+                CreateAutomaticBackup(config, content);
+                AtomicWrite(ConfigPath, content);
+                return true;
             }
-
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("{");
-            sb.AppendLine("  \"IdleSeconds\": " + Inv(config.IdleSeconds) + ",");
-            sb.AppendLine("  \"FadeSeconds\": " + Inv(config.FadeSeconds) + ",");
-            sb.AppendLine("  \"LaunchIntervalMs\": " + config.LaunchIntervalMs.ToString(CultureInfo.InvariantCulture) + ",");
-            sb.AppendLine("  \"AutoStart\": " + (config.AutoStart ? "true" : "false") + ",");
-            sb.AppendLine("  \"PauseInFullscreen\": " + (config.PauseInFullscreen ? "true" : "false") + ",");
-            sb.AppendLine("  \"BackupIntervalHours\": " + Inv(config.BackupIntervalHours) + ",");
-            sb.AppendLine("  \"BackupMaxCount\": " + config.BackupMaxCount.ToString(CultureInfo.InvariantCulture) + ",");
-            sb.AppendLine("  \"CheckForUpdates\": " + (config.CheckForUpdates != false ? "true" : "false") + ",");
-            sb.AppendLine("  \"LastUpdateCheck\": \"" + Escape(config.LastUpdateCheck) + "\",");
-            sb.AppendLine("  \"SkippedVersion\": \"" + Escape(config.SkippedVersion) + "\",");
-            sb.AppendLine("  \"EnableSnap\": " + (config.EnableSnap == true ? "true" : "false") + ",");
-            sb.AppendLine("  \"EnableAutoReplace\": " + (config.EnableAutoReplace == true ? "true" : "false") + ",");
-            sb.AppendLine("  \"CollapseHoverTrigger\": \"" + Escape(config.CollapseHoverTrigger) + "\",");
-            sb.AppendLine("  \"Mode\": \"" + Escape(config.Mode) + "\",");
-            sb.AppendLine("  \"Regions\": [");
-
-            for (int i = 0; i < config.Regions.Count; i++)
+            catch (Exception ex)
             {
-                RegionConfig region = config.Regions[i];
-                sb.AppendLine("    {");
-                sb.AppendLine("      \"Id\": \"" + Escape(region.Id) + "\",");
-                sb.AppendLine("      \"Name\": \"" + Escape(region.Name) + "\",");
-                sb.AppendLine("      \"X\": " + Inv(region.X) + ",");
-                sb.AppendLine("      \"Y\": " + Inv(region.Y) + ",");
-                sb.AppendLine("      \"Width\": " + Inv(region.Width) + ",");
-                sb.AppendLine("      \"Height\": " + Inv(region.Height) + ",");
-                sb.AppendLine("      \"DockEdge\": \"" + Escape(region.DockEdge) + "\",");
-                sb.AppendLine("      \"DockOrder\": " + region.DockOrder.ToString(CultureInfo.InvariantCulture) + ",");
-                sb.AppendLine("      \"ShowExtensions\": \"" + Escape(region.ShowExtensions) + "\",");
-                sb.AppendLine("      \"Items\": [");
-
-                for (int j = 0; j < region.Items.Count; j++)
-                {
-                    DesktopItem item = region.Items[j];
-                    sb.Append("        { \"Type\": \"" + Escape(item.Type) + "\", ");
-                    sb.Append("\"Path\": \"" + Escape(item.Path) + "\", ");
-                    sb.Append("\"Name\": \"" + Escape(item.Name) + "\", ");
-                    sb.Append("\"Aliases\": \"" + Escape(item.Aliases) + "\", ");
-                    sb.Append("\"IconPath\": \"" + Escape(item.IconPath) + "\", ");
-                    sb.Append("\"ExternalReference\": " + (item.ExternalReference ? "true" : "false") + " }");
-                    if (j < region.Items.Count - 1)
-                    {
-                        sb.Append(",");
-                    }
-                    sb.AppendLine();
-                }
-
-                sb.AppendLine("      ],");
-                sb.AppendLine("      \"LaunchItems\": [");
-
-                for (int j = 0; j < region.LaunchItems.Count; j++)
-                {
-                    DesktopItem item = region.LaunchItems[j];
-                    sb.Append("        { \"Type\": \"" + Escape(item.Type) + "\", ");
-                    sb.Append("\"Path\": \"" + Escape(item.Path) + "\", ");
-                    sb.Append("\"Name\": \"" + Escape(item.Name) + "\", ");
-                    sb.Append("\"Aliases\": \"" + Escape(item.Aliases) + "\", ");
-                    sb.Append("\"IconPath\": \"" + Escape(item.IconPath) + "\", ");
-                    sb.Append("\"ExternalReference\": " + (item.ExternalReference ? "true" : "false") + " }");
-                    if (j < region.LaunchItems.Count - 1)
-                    {
-                        sb.Append(",");
-                    }
-                    sb.AppendLine();
-                }
-
-                sb.AppendLine("      ]");
-                if (i < config.Regions.Count - 1)
-                {
-                    sb.AppendLine("    },");
-                }
-                else
-                {
-                    sb.AppendLine("    }");
-                }
+                LastSaveError = ex;
+                return false;
             }
-
-            sb.AppendLine("  ]");
-            sb.AppendLine("}");
-
-            string content = sb.ToString();
-            CreateAutomaticBackup(config, content);
-            AtomicWrite(ConfigPath, content);
         }
 
         private static void AtomicWrite(string path, string content)
         {
             lock (AtomicWriteLock)
             {
-                try
+                string directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory) &&
+                    !Directory.Exists(directory))
                 {
-                    string directory = Path.GetDirectoryName(path);
-                    if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-                    {
-                        Directory.CreateDirectory(directory);
-                    }
-                }
-                catch
-                {
+                    Directory.CreateDirectory(directory);
                 }
 
                 if (File.Exists(path))
@@ -441,6 +577,7 @@ namespace GhostDesk
                 string tempPath = path + ".tmp." +
                     Guid.NewGuid().ToString("N").Substring(0, 8);
                 bool replaced = false;
+                Exception writeError = null;
                 try
                 {
                     File.WriteAllText(tempPath, content, new UTF8Encoding(false));
@@ -458,31 +595,49 @@ namespace GhostDesk
                         replaced = true;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
+                    writeError = ex;
                     replaced = false;
                 }
-                finally
+
+                if (!replaced)
                 {
-                    if (!replaced)
+                    try
                     {
-                        try
-                        {
-                            File.WriteAllText(path, content, new UTF8Encoding(false));
-                        }
-                        catch
-                        {
-                        }
+                        File.WriteAllText(path, content, new UTF8Encoding(false));
+                        replaced = true;
                     }
-                    if (File.Exists(tempPath))
+                    catch (Exception fallbackError)
                     {
-                        try
+                        if (File.Exists(tempPath))
                         {
-                            File.Delete(tempPath);
+                            try
+                            {
+                                File.Delete(tempPath);
+                            }
+                            catch
+                            {
+                            }
                         }
-                        catch
-                        {
-                        }
+
+                        AggregateException causes = writeError == null
+                            ? new AggregateException(fallbackError)
+                            : new AggregateException(writeError, fallbackError);
+                        throw new IOException(
+                            "配置写入失败：" + path,
+                            causes);
+                    }
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    try
+                    {
+                        File.Delete(tempPath);
+                    }
+                    catch
+                    {
                     }
                 }
             }
@@ -607,6 +762,15 @@ namespace GhostDesk
 
         private static string FindBestLegacyConfig()
         {
+            if (string.Equals(
+                    Environment.GetEnvironmentVariable(
+                        "GHOSTDESK_TEST_DISABLE_LEGACY_MIGRATION"),
+                    "1",
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
             List<string> candidates = new List<string>();
             HashSet<string> seen = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
@@ -818,7 +982,9 @@ namespace GhostDesk
             config.IdleSeconds = 3.0;
             config.FadeSeconds = 0.8;
             config.LaunchIntervalMs = 400;
+            config.ScheduledTasks = new List<ScheduledTaskConfig>();
             config.AutoStart = false;
+            config.ShowHiddenFiles = false;
             config.PauseInFullscreen = true;
             config.BackupIntervalHours = 12.0;
             config.BackupMaxCount = 7;
@@ -880,6 +1046,10 @@ namespace GhostDesk
             else if (config.LaunchIntervalMs > 5000)
             {
                 config.LaunchIntervalMs = 5000;
+            }
+            if (NormalizeScheduledTasks(config))
+            {
+                configurationMigrated = true;
             }
             if (config.BackupIntervalHours < 1.0)
             {
@@ -1006,8 +1176,9 @@ namespace GhostDesk
                         item.IconPath = "";
                     }
 
-                    if (MigrateExternalReference(item))
+                    if (item.OriginalPath == null)
                     {
+                        item.OriginalPath = "";
                         configurationMigrated = true;
                     }
                 }
@@ -1029,67 +1200,280 @@ namespace GhostDesk
                         item.IconPath = "";
                     }
 
-                    if (MigrateExternalReference(item))
+                    if (item.OriginalPath == null)
                     {
+                        item.OriginalPath = "";
                         configurationMigrated = true;
                     }
                 }
             }
 
+            NormalizeDockOrders(config.Regions);
+
+            // 旧版就有的修复：分区的快捷方式被外部改名/重建后，按名称重新指向现存的那份
             if (ShortcutPathRepair.RepairMissingShortcutItems(config.Regions))
             {
                 configurationMigrated = true;
             }
 
-            NormalizeDockOrders(config.Regions);
             return configurationMigrated;
         }
 
-        private static bool MigrateExternalReference(DesktopItem item)
+        private static bool NormalizeScheduledTasks(AppConfig config)
         {
-            if (item == null ||
-                string.IsNullOrWhiteSpace(item.Path) ||
-                item.Path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase))
+            if (config.ScheduledTasks == null)
             {
-                return false;
-            }
-
-            if (string.Equals(
-                    Path.GetExtension(item.Path),
-                    ".lnk",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                if (!item.ExternalReference)
-                {
-                    return false;
-                }
-
-                item.ExternalReference = false;
+                config.ScheduledTasks = new List<ScheduledTaskConfig>();
                 return true;
             }
 
-            if (item.ExternalReference)
+            bool changed = false;
+            HashSet<string> ids = new HashSet<string>(StringComparer.Ordinal);
+            for (int index = config.ScheduledTasks.Count - 1; index >= 0; index--)
             {
-                return false;
+                if (config.ScheduledTasks[index] == null)
+                {
+                    config.ScheduledTasks.RemoveAt(index);
+                    changed = true;
+                }
             }
 
-            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            if (string.IsNullOrEmpty(desktop))
+            string now = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            foreach (ScheduledTaskConfig task in config.ScheduledTasks)
             {
-                return false;
+                if (string.IsNullOrWhiteSpace(task.Id) || !ids.Add(task.Id))
+                {
+                    task.Id = Guid.NewGuid().ToString("N");
+                    ids.Add(task.Id);
+                    changed = true;
+                }
+
+                if (string.IsNullOrWhiteSpace(task.Name))
+                {
+                    task.Name = "定时任务";
+                    changed = true;
+                }
+
+                string type = (task.TaskType ?? "").Trim().ToLowerInvariant();
+                if (type != ScheduledTaskConfig.TypeApplication &&
+                    type != ScheduledTaskConfig.TypeFile &&
+                    type != ScheduledTaskConfig.TypeUrl &&
+                    type != ScheduledTaskConfig.TypeShutdown)
+                {
+                    type = ScheduledTaskConfig.TypeFile;
+                    changed = true;
+                }
+                if (!string.Equals(type, task.TaskType, StringComparison.Ordinal))
+                {
+                    task.TaskType = type;
+                    changed = true;
+                }
+
+                if (task.Target == null)
+                {
+                    task.Target = "";
+                    changed = true;
+                }
+
+                string mode = (task.ScheduleMode ?? "").Trim().ToLowerInvariant();
+                if (mode != ScheduledTaskConfig.ModeOnce &&
+                    mode != ScheduledTaskConfig.ModeDaily &&
+                    mode != ScheduledTaskConfig.ModeWeekly &&
+                    mode != ScheduledTaskConfig.ModeInterval)
+                {
+                    mode = ScheduledTaskConfig.ModeOnce;
+                    changed = true;
+                }
+                if (!string.Equals(mode, task.ScheduleMode, StringComparison.Ordinal))
+                {
+                    task.ScheduleMode = mode;
+                    changed = true;
+                }
+
+                DateTime time;
+                if (!DateTime.TryParseExact(
+                        (task.Time ?? "").Trim(),
+                        "HH:mm",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None,
+                        out time))
+                {
+                    task.Time = "09:00";
+                    changed = true;
+                }
+                else
+                {
+                    string normalizedTime = time.ToString("HH:mm", CultureInfo.InvariantCulture);
+                    if (!string.Equals(normalizedTime, task.Time, StringComparison.Ordinal))
+                    {
+                        task.Time = normalizedTime;
+                        changed = true;
+                    }
+                }
+
+                int day = Math.Max(0, Math.Min(6, task.DayOfWeek));
+                if (day != task.DayOfWeek)
+                {
+                    task.DayOfWeek = day;
+                    changed = true;
+                }
+
+                int interval = task.IntervalMinutes;
+                if (interval < 1)
+                {
+                    interval = 60;
+                }
+                else if (interval > 10080)
+                {
+                    interval = 10080;
+                }
+                if (interval != task.IntervalMinutes)
+                {
+                    task.IntervalMinutes = interval;
+                    changed = true;
+                }
+
+                int countdown = task.CountdownSeconds;
+                if (countdown < 0)
+                {
+                    countdown = 0;
+                }
+                else if (countdown > 600)
+                {
+                    countdown = 600;
+                }
+                if (countdown != task.CountdownSeconds)
+                {
+                    task.CountdownSeconds = countdown;
+                    changed = true;
+                }
+
+                DateTime created;
+                if (!DateTime.TryParse(
+                        task.CreatedUtc,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind,
+                        out created))
+                {
+                    task.CreatedUtc = now;
+                    changed = true;
+                }
+                else
+                {
+                    string normalizedCreated =
+                        created.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+                    if (!string.Equals(
+                            normalizedCreated,
+                            task.CreatedUtc,
+                            StringComparison.Ordinal))
+                    {
+                        task.CreatedUtc = normalizedCreated;
+                        changed = true;
+                    }
+                }
+
+                DateTime firstRun;
+                if (!DateTime.TryParse(
+                        task.FirstRunUtc,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind,
+                        out firstRun))
+                {
+                    DateTime baseline;
+                    if (!DateTime.TryParse(
+                            task.CreatedUtc,
+                            CultureInfo.InvariantCulture,
+                            DateTimeStyles.RoundtripKind,
+                            out baseline))
+                    {
+                        baseline = DateTime.UtcNow;
+                    }
+
+                    if (string.Equals(
+                            task.ScheduleMode,
+                            ScheduledTaskConfig.ModeInterval,
+                            StringComparison.Ordinal))
+                    {
+                        firstRun = baseline.ToUniversalTime();
+                    }
+                    else
+                    {
+                        DateTime localBaseline = baseline.ToLocalTime();
+                        firstRun = localBaseline.Date.Add(time.TimeOfDay);
+                        if (string.Equals(
+                                task.ScheduleMode,
+                                ScheduledTaskConfig.ModeWeekly,
+                                StringComparison.Ordinal))
+                        {
+                            int delta =
+                                (task.DayOfWeek - (int)localBaseline.DayOfWeek + 7) % 7;
+                            firstRun = firstRun.AddDays(delta);
+                        }
+
+                        if (firstRun < localBaseline)
+                        {
+                            firstRun = firstRun.AddDays(
+                                string.Equals(
+                                    task.ScheduleMode,
+                                    ScheduledTaskConfig.ModeWeekly,
+                                    StringComparison.Ordinal)
+                                    ? 7
+                                    : 1);
+                        }
+
+                        firstRun = firstRun.ToUniversalTime();
+                    }
+
+                    task.FirstRunUtc = firstRun.ToString(
+                        "o",
+                        CultureInfo.InvariantCulture);
+                    changed = true;
+                }
+                else
+                {
+                    string normalizedFirstRun =
+                        firstRun.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+                    if (!string.Equals(
+                            normalizedFirstRun,
+                            task.FirstRunUtc,
+                            StringComparison.Ordinal))
+                    {
+                        task.FirstRunUtc = normalizedFirstRun;
+                        changed = true;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(task.LastRunUtc))
+                {
+                    DateTime lastRun;
+                    if (!DateTime.TryParse(
+                            task.LastRunUtc,
+                            CultureInfo.InvariantCulture,
+                            DateTimeStyles.RoundtripKind,
+                            out lastRun))
+                    {
+                        task.LastRunUtc = "";
+                        changed = true;
+                    }
+                    else
+                    {
+                        string normalizedLast =
+                            lastRun.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+                        if (!string.Equals(normalizedLast, task.LastRunUtc, StringComparison.Ordinal))
+                        {
+                            task.LastRunUtc = normalizedLast;
+                            changed = true;
+                        }
+                    }
+                }
+                else if (task.LastRunUtc == null)
+                {
+                    task.LastRunUtc = "";
+                    changed = true;
+                }
             }
 
-            string normalizedPath = item.Path.TrimEnd('\\');
-            string normalizedDesktop = desktop.TrimEnd('\\');
-            if (normalizedPath.StartsWith(
-                normalizedDesktop + "\\",
-                StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            item.ExternalReference = true;
-            return true;
+            return changed;
         }
 
         private static void NormalizeDockOrders(List<RegionConfig> regions)
@@ -1236,6 +1620,16 @@ namespace GhostDesk
         private static string Inv(double value)
         {
             return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatNullableBool(bool? value)
+        {
+            if (!value.HasValue)
+            {
+                return "null";
+            }
+
+            return value.Value ? "true" : "false";
         }
 
         private static string Escape(string value)

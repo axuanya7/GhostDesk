@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
+using System.IO;
 using System.Threading;
 using System.Windows;
 using System.Windows.Forms;
@@ -13,6 +14,7 @@ namespace GhostDesk
     internal class AppController
     {
         private readonly AppConfig _config;
+        private readonly StorageManifest _manifest;
         private readonly DesktopWindow _desktop;
         private NotifyIcon _tray;
         private Icon _trayIcon;
@@ -23,6 +25,10 @@ namespace GhostDesk
         private bool _updateInProgress;
         private bool _launchInProgress;
         private SettingsWindow _settingsWindow;
+        private ScheduledTaskRunner _scheduledTaskRunner;
+
+        /// <summary>当前配置文件结构版本。旧版本升级时靠它触发一次性迁移。</summary>
+        internal const int ConfigVersion = 2;
 
         public DesktopWindow Desktop
         {
@@ -32,11 +38,44 @@ namespace GhostDesk
         public AppController()
         {
             _config = ConfigStore.Load();
+            _manifest = new StorageManifest(
+                StorageManifest.DefaultPath(ItemStorage.StorageDirectory));
+            _manifest.Load();
+            // 升级迁移：旧版本把文件搬进 {exeDir}\Storage，这里放回原位置并改写为新语义
+            bool legacyMigrated = ItemStorage.MigrateLegacyStorageToInPlace(_config);
+
+            // 启动自愈：桌面上的分区项必须处于「收纳中」，否则旧版本留下的空标记会让图标全露出来
+            bool flagsHealed = ItemStorage.RepairManagedFlags(_config);
+
+            if (legacyMigrated ||
+                flagsHealed ||
+                !_config.ConfigVersion.HasValue ||
+                _config.ConfigVersion.Value < ConfigVersion)
+            {
+                _config.ConfigVersion = ConfigVersion;
+                ConfigStore.Save(_config);
+            }
+
+            // 启动：始终确保收纳项带隐藏属性；「显示隐藏文件」只切换资源管理器设置，不动文件属性
+            ItemStorage.SynchronizeManagedVisibility(_config, false);
+
+            if (_config.ShowHiddenFiles)
+            {
+                if (!_config.ExplorerHiddenOriginal.HasValue)
+                {
+                    _config.ExplorerHiddenOriginal = StorageSafety.ReadExplorerHidden();
+                }
+
+                StorageSafety.SetExplorerHidden(1);
+            }
             ApplyAutoStartFromRegistry();
 
-            _desktop = new DesktopWindow(_config);
+            _desktop = new DesktopWindow(_config, _manifest);
             _desktop.ConfigChanged += HandleConfigChanged;
             _desktop.Show();
+
+            _scheduledTaskRunner = new ScheduledTaskRunner(_config, RunScheduledTask);
+            _scheduledTaskRunner.Start();
 
             CreateTray();
             _desktop.LaunchRequested += LaunchRegionById;
@@ -51,6 +90,7 @@ namespace GhostDesk
                     }),
                     System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             }
+            CheckStorageHealth();
             StartUpdateCheck();
         }
 
@@ -82,6 +122,10 @@ namespace GhostDesk
 
             _launchMenu = new ToolStripMenuItem("一键启动");
             menu.Items.Add(_launchMenu);
+
+            ToolStripMenuItem scheduledTasks = new ToolStripMenuItem("定时启动");
+            scheduledTasks.Click += ScheduledTasks_Click;
+            menu.Items.Add(scheduledTasks);
 
             menu.Items.Add(new ToolStripSeparator());
 
@@ -304,7 +348,8 @@ namespace GhostDesk
                                 System.Windows.Application.Current.Dispatcher.BeginInvoke(
                                     new Action(delegate
                                     {
-                                        CloseApplication();
+                                        // 自动更新后重启：不弹"是否恢复图标"
+                                        CloseApplication(false);
                                     }));
                             }
                             else
@@ -394,11 +439,34 @@ namespace GhostDesk
 
         private void Settings_Click(object sender, EventArgs e)
         {
+            OpenSettings(null);
+        }
+
+        private void ScheduledTasks_Click(object sender, EventArgs e)
+        {
+            OpenSettings("schedule");
+        }
+
+        private void OpenSettings(string page)
+        {
             SaveConfig();
 
             if (_settingsWindow != null)
             {
-                _settingsWindow.Activate();
+                if (string.Equals(page, "schedule", StringComparison.Ordinal))
+                {
+                    _settingsWindow.ShowSchedulePage();
+                }
+                else
+                {
+                    if (_settingsWindow.WindowState == WindowState.Minimized)
+                    {
+                        _settingsWindow.WindowState = WindowState.Normal;
+                    }
+
+                    _settingsWindow.Activate();
+                    _settingsWindow.Focus();
+                }
                 return;
             }
 
@@ -410,7 +478,8 @@ namespace GhostDesk
                 delegate
                 {
                     CheckUpdate_Click(null, null);
-                });
+                },
+                _scheduledTaskRunner);
             window.Closed += delegate
             {
                 _settingsWindow = null;
@@ -418,11 +487,17 @@ namespace GhostDesk
             };
             _settingsWindow = window;
             window.Show();
+
+            if (string.Equals(page, "schedule", StringComparison.Ordinal))
+            {
+                window.ShowSchedulePage();
+            }
         }
 
         private void RestartApplication()
         {
             Program.RestartRequested = true;
+            DisposeScheduledTasks();
 
             if (_tray != null)
             {
@@ -446,7 +521,48 @@ namespace GhostDesk
 
         private void CloseApplication()
         {
+            CloseApplication(true);
+        }
+
+        private void CloseApplication(bool askRestoreIcons)
+        {
+            // 退出前询问：是否把收纳区图标恢复到桌面（配置保留，下次启动仍会按配置重新收纳）
+            if (askRestoreIcons && _config != null)
+            {
+                int hiddenCount = ItemStorage.CollectHiddenPaths(_config).Count;
+                if (hiddenCount > 0)
+                {
+                    ExitConfirmWindow prompt = new ExitConfirmWindow(hiddenCount, _desktop);
+                    prompt.ShowDialog();
+                    if (prompt.Choice == ExitConfirmWindow.ChoiceCancel)
+                    {
+                        return;
+                    }
+
+                    if (prompt.Choice == ExitConfirmWindow.ChoiceRestore)
+                    {
+                        ItemStorage.RestoreHiddenToDesktop(_config);
+                    }
+                }
+            }
+
+            // 退出时把资源管理器的「显示隐藏文件」恢复成开启前的值
+            if (_config != null && _config.ShowHiddenFiles)
+            {
+                int original = 2;
+                if (_config.ExplorerHiddenOriginal.HasValue &&
+                    _config.ExplorerHiddenOriginal.Value != 0)
+                {
+                    original = _config.ExplorerHiddenOriginal.Value;
+                }
+
+                StorageSafety.SetExplorerHidden(original);
+                _config.ShowHiddenFiles = false;
+                _config.ExplorerHiddenOriginal = null;
+            }
+
             SaveConfig();
+            DisposeScheduledTasks();
             if (_tray != null)
             {
                 _tray.Visible = false;
@@ -513,7 +629,6 @@ namespace GhostDesk
 
         private void HandleConfigChanged()
         {
-            SaveConfig();
             if (_tray != null && _launchMenu != null)
             {
                 UpdateTrayForMode();
@@ -522,6 +637,80 @@ namespace GhostDesk
             if (_settingsWindow != null)
             {
                 _settingsWindow.RefreshLaunchPage();
+                _settingsWindow.RefreshSchedulePage();
+            }
+
+            if (_scheduledTaskRunner != null)
+            {
+                _scheduledTaskRunner.CheckNow();
+            }
+        }
+
+        private void DisposeScheduledTasks()
+        {
+            if (_scheduledTaskRunner == null)
+            {
+                return;
+            }
+
+            _scheduledTaskRunner.Dispose();
+            _scheduledTaskRunner = null;
+        }
+
+        private bool RunScheduledTask(ScheduledTaskConfig task)
+        {
+            if (task == null)
+            {
+                return false;
+            }
+
+            if (string.Equals(
+                    task.TaskType,
+                    ScheduledTaskConfig.TypeShutdown,
+                    StringComparison.Ordinal))
+            {
+                try
+                {
+                    ProcessStartInfo shutdown =
+                        new ProcessStartInfo("shutdown.exe", "/s /t 0");
+                    shutdown.UseShellExecute = false;
+                    shutdown.CreateNoWindow = true;
+                    Process.Start(shutdown);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            string target = (task.Target ?? "").Trim();
+            if (target.Length == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (string.Equals(
+                        task.TaskType,
+                        ScheduledTaskConfig.TypeUrl,
+                        StringComparison.Ordinal))
+                {
+                    ProcessStartInfo browser = new ProcessStartInfo(target);
+                    browser.UseShellExecute = true;
+                    Process.Start(browser);
+                }
+                else
+                {
+                    Process.Start(CreateLaunchStartInfo(target));
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -624,14 +813,13 @@ namespace GhostDesk
         internal static ProcessStartInfo CreateLaunchStartInfo(string path)
         {
             string launchPath = path;
-            if (!path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+            if (path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
             {
-                string sourceDirectory = GetLaunchWorkingDirectory(path);
-                string existingShortcut =
-                    DesktopItemControl.FindExistingShortcutForTarget(path, sourceDirectory);
-                if (!string.IsNullOrEmpty(existingShortcut))
+                ProcessStartInfo shortcutStartInfo =
+                    CreateShortcutStartInfo(path);
+                if (shortcutStartInfo != null)
                 {
-                    launchPath = existingShortcut;
+                    return shortcutStartInfo;
                 }
             }
 
@@ -648,6 +836,59 @@ namespace GhostDesk
             }
 
             return startInfo;
+        }
+
+        private static ProcessStartInfo CreateShortcutStartInfo(
+            string shortcutPath)
+        {
+            try
+            {
+                string target =
+                    DesktopItemControl.ReadWindowsShortcutProperty(
+                        shortcutPath,
+                        "TargetPath") as string;
+                if (string.IsNullOrWhiteSpace(target))
+                {
+                    return null;
+                }
+
+                target = Environment.ExpandEnvironmentVariables(
+                    target.Trim().Trim('"'));
+                if (!System.IO.File.Exists(target) ||
+                    !target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                string arguments =
+                    DesktopItemControl.ReadWindowsShortcutProperty(
+                        shortcutPath,
+                        "Arguments") as string;
+                string workingDirectory =
+                    DesktopItemControl.ReadWindowsShortcutProperty(
+                        shortcutPath,
+                        "WorkingDirectory") as string;
+
+                ProcessStartInfo startInfo = new ProcessStartInfo(target);
+                startInfo.Arguments = arguments ?? "";
+                startInfo.UseShellExecute = false;
+                if (string.IsNullOrWhiteSpace(workingDirectory) ||
+                    !System.IO.Directory.Exists(workingDirectory))
+                {
+                    workingDirectory = GetLaunchWorkingDirectory(target);
+                }
+
+                if (!string.IsNullOrWhiteSpace(workingDirectory))
+                {
+                    startInfo.WorkingDirectory = workingDirectory;
+                }
+
+                return startInfo;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static string GetLaunchWorkingDirectory(string path)
@@ -762,6 +1003,88 @@ namespace GhostDesk
             {
                 System.Windows.MessageBox.Show("开机自启设置失败：\n" + ex.Message, "GhostDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
+        }
+
+        private void CheckStorageHealth()
+        {
+            // 新语义：收纳不再创建 Storage 目录。
+            // 只有历史版本留下的 Storage 才做健康检查与孤儿扫描。
+            if (!Directory.Exists(ItemStorage.StorageDirectory))
+            {
+                return;
+            }
+
+            string reason;
+            if (!StorageSafety.ValidateStorageDirectory(
+                    ItemStorage.StorageDirectory,
+                    out reason))
+            {
+                ShowStorageWarning(
+                    "历史收纳目录不可用：" + reason);
+            }
+
+            HashSet<string> known =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (RegionConfig region in _config.Regions)
+            {
+                if (region == null)
+                {
+                    continue;
+                }
+
+                CollectItemPaths(region.Items, known);
+                CollectItemPaths(region.LaunchItems, known);
+            }
+
+            List<StorageManifest.Entry> orphans =
+                _manifest.FindOrphans(
+                    ItemStorage.StorageDirectory,
+                    known);
+            if (orphans.Count > 0)
+            {
+                ShowStorageWarning(
+                    string.Format(
+                        "收纳目录中有 {0} 个文件未被任何分区引用（可能是配置丢失）。可在设置中恢复或清理。",
+                        orphans.Count));
+            }
+        }
+
+        private static void CollectItemPaths(
+            List<DesktopItem> items,
+            HashSet<string> paths)
+        {
+            if (items == null)
+            {
+                return;
+            }
+
+            foreach (DesktopItem item in items)
+            {
+                if (item != null &&
+                    !string.IsNullOrWhiteSpace(item.Path))
+                {
+                    paths.Add(item.Path);
+                }
+            }
+        }
+
+        private void ShowStorageWarning(string message)
+        {
+            if (_tray != null)
+            {
+                _tray.ShowBalloonTip(
+                    5000,
+                    "GhostDesk 收纳安全提示",
+                    message,
+                    ToolTipIcon.Warning);
+                return;
+            }
+
+            System.Windows.MessageBox.Show(
+                message,
+                "GhostDesk",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
         }
     }
 

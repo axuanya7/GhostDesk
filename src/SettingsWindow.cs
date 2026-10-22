@@ -18,6 +18,7 @@ namespace GhostDesk
         private readonly Action<bool> _setAutoStart;
         private readonly Action _reloadApplication;
         private readonly Action _checkForUpdates;
+        private readonly ScheduledTaskRunner _scheduledTasks;
         private readonly List<Button> _navButtons = new List<Button>();
         private readonly Dictionary<string, Border> _navAccentBars =
             new Dictionary<string, Border>(StringComparer.Ordinal);
@@ -42,6 +43,7 @@ namespace GhostDesk
         private static Style _settingsCheckBoxStyle;
         private static Style _settingsRadioButtonStyle;
         private static Style _settingsSliderStyle;
+        private static Style _settingsTextBoxStyle;
 
         private Border _windowRoot;
         private TextBlock _pageTitle;
@@ -53,6 +55,8 @@ namespace GhostDesk
         private Slider _fadeSlider;
         private TextBlock _fadeValue;
         private CheckBox _autoStartCheck;
+        private CheckBox _showHiddenFilesCheck;
+        private bool _suppressVisibilityChange;
         private CheckBox _enableSnapCheck;
         private CheckBox _showExtensionsCheck;
         private Slider _backupIntervalSlider;
@@ -64,6 +68,9 @@ namespace GhostDesk
         private StackPanel _launchOverviewHost;
         private Slider _launchIntervalSlider;
         private TextBlock _launchIntervalValue;
+        private StackPanel _scheduleList;
+        private TextBlock _scheduleCountText;
+        private string _scheduleSearchText = "";
         private string _currentPage = "regions";
         private TextBlock _backupStatusText;
         private StackPanel _autoBackupHost;
@@ -77,13 +84,15 @@ namespace GhostDesk
             DesktopWindow desktop,
             Action<bool> setAutoStart,
             Action reloadApplication,
-            Action checkForUpdates)
+            Action checkForUpdates,
+            ScheduledTaskRunner scheduledTasks)
         {
             _config = config;
             _desktop = desktop;
             _setAutoStart = setAutoStart;
             _reloadApplication = reloadApplication;
             _checkForUpdates = checkForUpdates;
+            _scheduledTasks = scheduledTasks;
 
             Title = "GhostDesk";
             Width = 860;
@@ -317,12 +326,26 @@ namespace GhostDesk
             nav.Children.Add(CreateNavButton("分区管理", "regions"));
             nav.Children.Add(CreateNavButton("隐身设置", "settings"));
             nav.Children.Add(CreateNavButton("一键启动", "launch"));
+            nav.Children.Add(CreateNavButton("定时启动", "schedule"));
             nav.Children.Add(CreateNavButton("高级设置", "advanced"));
             nav.Children.Add(CreateNavButton("关于软件", "about"));
             Grid.SetRow(nav, 1);
             grid.Children.Add(nav);
 
             StackPanel footer = new StackPanel();
+
+            _showHiddenFilesCheck = GlassTheme.CreateToggleCheckBox("显示隐藏文件");
+            _showHiddenFilesCheck.IsChecked = _config.ShowHiddenFiles;
+            _showHiddenFilesCheck.Margin = new Thickness(0, 0, 0, 2);
+            _showHiddenFilesCheck.Checked += ShowHiddenFiles_Changed;
+            _showHiddenFilesCheck.Unchecked += ShowHiddenFiles_Changed;
+            footer.Children.Add(_showHiddenFilesCheck);
+
+            TextBlock hiddenHint = GlassTheme.CreateText("仅用于临时查看桌面隐藏文件", 11, true);
+            hiddenHint.Margin = new Thickness(1, 0, 0, 14);
+            hiddenHint.Opacity = 0.62;
+            footer.Children.Add(hiddenHint);
+
             _autoStartCheck = GlassTheme.CreateToggleCheckBox("开机自启");
             _autoStartCheck.IsChecked = _config.AutoStart;
             _autoStartCheck.Margin = new Thickness(0, 0, 0, 14);
@@ -463,6 +486,13 @@ namespace GhostDesk
                 _pageSubtitle.Text = "把常用软件绑定到现有分区，一次点击集中启动";
                 _pageHost.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
                 _pageHost.Content = BuildLaunchPage();
+            }
+            else if (string.Equals(page, "schedule", StringComparison.Ordinal))
+            {
+                _pageTitle.Text = "定时启动";
+                _pageSubtitle.Text = "按计划启动应用、文件或网址，也可定时关机";
+                _pageHost.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+                _pageHost.Content = BuildSchedulePage();
             }
             else if (string.Equals(page, "advanced", StringComparison.Ordinal))
             {
@@ -919,6 +949,716 @@ namespace GhostDesk
 
             _config.LaunchIntervalMs = (int)Math.Round(e.NewValue, 0);
             _launchIntervalValue.Text = _config.LaunchIntervalMs.ToString() + " 毫秒";
+        }
+
+        private UIElement BuildSchedulePage()
+        {
+            StackPanel page = new StackPanel();
+
+            Grid summary = new Grid();
+            summary.Margin = new Thickness(0, 0, 0, 10);
+            summary.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star)
+            });
+            summary.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+
+            StackPanel summaryText = new StackPanel();
+            TextBlock heading = GlassTheme.CreateText("任务清单", 14, false);
+            heading.FontWeight = FontWeights.SemiBold;
+            summaryText.Children.Add(heading);
+
+            _scheduleCountText = GlassTheme.CreateText(
+                GetScheduledTaskCountText(),
+                11,
+                true);
+            _scheduleCountText.Margin = new Thickness(0, 3, 0, 0);
+            summaryText.Children.Add(_scheduleCountText);
+            summary.Children.Add(summaryText);
+
+            Button add = GlassTheme.CreateButton("添加任务", ButtonKind.Primary);
+            add.MinWidth = 92;
+            add.Click += AddScheduledTask_Click;
+            Grid.SetColumn(add, 1);
+            summary.Children.Add(add);
+            page.Children.Add(summary);
+
+            Grid search = CreateScheduleSearchBox();
+            search.Margin = new Thickness(0, 0, 0, 8);
+            page.Children.Add(search);
+
+            TextBlock hint = GlassTheme.CreateText(
+                "任务按设定的绝对时间执行；开启提前提醒后，可在执行前取消或立即运行。",
+                11,
+                true);
+            hint.TextWrapping = TextWrapping.Wrap;
+            hint.Margin = new Thickness(0, 0, 0, 12);
+            hint.Opacity = 0.8;
+            page.Children.Add(hint);
+
+            _scheduleList = new StackPanel();
+            page.Children.Add(_scheduleList);
+            RefreshScheduleList();
+            return page;
+        }
+
+        public void RefreshSchedulePage()
+        {
+            if (string.Equals(_currentPage, "schedule", StringComparison.Ordinal) &&
+                _pageHost != null)
+            {
+                _pageHost.Content = BuildSchedulePage();
+            }
+        }
+
+        public void ShowSchedulePage()
+        {
+            Navigate("schedule");
+
+            if (WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+            }
+
+            Activate();
+            Topmost = true;
+            Topmost = false;
+            Focus();
+        }
+
+        private string GetScheduledTaskCountText()
+        {
+            int count = _config.ScheduledTasks == null
+                ? 0
+                : _config.ScheduledTasks.Count;
+            return "共 " + count.ToString() + " 个任务";
+        }
+
+        private void RefreshScheduleList()
+        {
+            if (_scheduleList == null)
+            {
+                return;
+            }
+
+            _scheduleList.Children.Clear();
+            int totalCount = _config.ScheduledTasks == null
+                ? 0
+                : _config.ScheduledTasks.Count;
+            int visibleCount = 0;
+
+            if (totalCount == 0)
+            {
+                TextBlock empty = GlassTheme.CreateText(
+                    "还没有定时任务。点击右上角“添加任务”开始配置。",
+                    12,
+                    true);
+                empty.TextWrapping = TextWrapping.Wrap;
+                empty.Margin = new Thickness(2, 10, 0, 0);
+                _scheduleList.Children.Add(empty);
+                UpdateScheduleCountText(_scheduleCountText, totalCount, visibleCount);
+                return;
+            }
+
+            foreach (ScheduledTaskConfig task in _config.ScheduledTasks)
+            {
+                if (task != null && MatchesScheduleSearch(task))
+                {
+                    _scheduleList.Children.Add(BuildScheduledTaskCard(task));
+                    visibleCount++;
+                }
+            }
+
+            if (visibleCount == 0)
+            {
+                TextBlock empty = GlassTheme.CreateText(
+                    "没有找到匹配的定时任务。",
+                    12,
+                    true);
+                empty.Margin = new Thickness(2, 10, 0, 0);
+                _scheduleList.Children.Add(empty);
+            }
+
+            UpdateScheduleCountText(_scheduleCountText, totalCount, visibleCount);
+        }
+
+        private UIElement BuildScheduledTaskCard(ScheduledTaskConfig task)
+        {
+            Border card = new Border();
+            card.Margin = new Thickness(0, 0, 0, 8);
+            card.Padding = new Thickness(11);
+            card.Background = CardSurfaceBrush;
+            card.BorderBrush = SettingsBorderBrush;
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(11);
+
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+            row.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star)
+            });
+            row.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+
+            row.Children.Add(CreateScheduleGlyph());
+
+            StackPanel info = new StackPanel();
+            info.VerticalAlignment = VerticalAlignment.Center;
+            info.Margin = new Thickness(11, 0, 12, 0);
+
+            Grid titleRow = new Grid();
+            titleRow.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star)
+            });
+            titleRow.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+            titleRow.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+
+            TextBlock name = GlassTheme.CreateText(
+                string.IsNullOrWhiteSpace(task.Name) ? "定时任务" : task.Name,
+                13,
+                false);
+            name.FontWeight = FontWeights.SemiBold;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            name.VerticalAlignment = VerticalAlignment.Center;
+            titleRow.Children.Add(name);
+
+            Border typeBadge = CreateScheduleBadge(
+                GetTaskTypeLabel(task.TaskType),
+                GlassTheme.CreateBrush(38, 112, 208, 255),
+                GlassTheme.CreateBrush(64, 139, 226, 255));
+            typeBadge.Margin = new Thickness(7, 0, 0, 0);
+            Grid.SetColumn(typeBadge, 1);
+            titleRow.Children.Add(typeBadge);
+
+            Border statusBadge = CreateScheduleBadge(
+                task.Enabled ? "已启用" : "已暂停",
+                task.Enabled
+                    ? GlassTheme.CreateBrush(28, 83, 214, 142)
+                    : GlassTheme.CreateBrush(28, 255, 112, 132),
+                task.Enabled
+                    ? GlassTheme.CreateBrush(52, 104, 226, 164)
+                    : GlassTheme.CreateBrush(52, 255, 128, 146));
+            statusBadge.Margin = new Thickness(6, 0, 0, 0);
+            Grid.SetColumn(statusBadge, 2);
+            titleRow.Children.Add(statusBadge);
+            info.Children.Add(titleRow);
+
+            TextBlock schedule = GlassTheme.CreateText(
+                DescribeSchedule(task),
+                11,
+                false);
+            schedule.Margin = new Thickness(0, 5, 0, 0);
+            schedule.TextTrimming = TextTrimming.CharacterEllipsis;
+            info.Children.Add(schedule);
+
+            string targetText = GetTaskTargetText(task);
+            if (targetText.Length > 0)
+            {
+                TextBlock target = GlassTheme.CreateText(targetText, 10, true);
+                target.Margin = new Thickness(0, 3, 0, 0);
+                target.TextTrimming = TextTrimming.CharacterEllipsis;
+                target.Opacity = 0.72;
+                info.Children.Add(target);
+            }
+
+            Grid.SetColumn(info, 1);
+            row.Children.Add(info);
+
+            StackPanel actions = new StackPanel();
+            actions.VerticalAlignment = VerticalAlignment.Center;
+            actions.HorizontalAlignment = HorizontalAlignment.Right;
+            actions.Width = 104;
+
+            CheckBox enabled = GlassTheme.CreateToggleCheckBox("启用");
+            enabled.Tag = task;
+            enabled.IsChecked = task.Enabled;
+            enabled.HorizontalAlignment = HorizontalAlignment.Right;
+            enabled.Checked += ScheduleEnabled_Changed;
+            enabled.Unchecked += ScheduleEnabled_Changed;
+            actions.Children.Add(enabled);
+
+            StackPanel buttons = new StackPanel();
+            buttons.Orientation = Orientation.Horizontal;
+            buttons.HorizontalAlignment = HorizontalAlignment.Right;
+            buttons.Margin = new Thickness(0, 5, 0, 0);
+
+            Button edit = GlassTheme.CreateButton("编辑", ButtonKind.Ghost);
+            edit.Tag = task;
+            edit.Height = 30;
+            edit.MinWidth = 46;
+            edit.Padding = new Thickness(9, 0, 9, 0);
+            edit.Margin = new Thickness(0, 0, 6, 0);
+            edit.Click += EditScheduledTask_Click;
+            buttons.Children.Add(edit);
+
+            Button remove = GlassTheme.CreateButton("删除", ButtonKind.Danger);
+            remove.Tag = task;
+            remove.Height = 30;
+            remove.MinWidth = 46;
+            remove.Padding = new Thickness(9, 0, 9, 0);
+            remove.Click += RemoveScheduledTask_Click;
+            buttons.Children.Add(remove);
+            actions.Children.Add(buttons);
+
+            Grid.SetColumn(actions, 2);
+            row.Children.Add(actions);
+            card.Child = row;
+            return card;
+        }
+
+        private static Border CreateScheduleBadge(
+            string text,
+            Brush background,
+            Brush borderBrush)
+        {
+            Border badge = new Border();
+            badge.Padding = new Thickness(6, 2, 6, 2);
+            badge.CornerRadius = new CornerRadius(6);
+            badge.Background = background;
+            badge.BorderBrush = borderBrush;
+            badge.BorderThickness = new Thickness(1);
+            badge.VerticalAlignment = VerticalAlignment.Center;
+
+            TextBlock label = GlassTheme.CreateText(text, 9, false);
+            label.HorizontalAlignment = HorizontalAlignment.Center;
+            badge.Child = label;
+            return badge;
+        }
+
+        private UIElement CreateScheduleGlyph()
+        {
+            Border glyph = new Border();
+            glyph.Width = 44;
+            glyph.Height = 44;
+            glyph.CornerRadius = new CornerRadius(12);
+            glyph.Background = GlassTheme.CreateBrush(42, 112, 208, 255);
+            glyph.BorderBrush = GlassTheme.CreateBrush(54, 139, 226, 255);
+            glyph.BorderThickness = new Thickness(1);
+            glyph.VerticalAlignment = VerticalAlignment.Center;
+
+            Grid clock = new Grid();
+            clock.Width = 25;
+            clock.Height = 25;
+            clock.HorizontalAlignment = HorizontalAlignment.Center;
+            clock.VerticalAlignment = VerticalAlignment.Center;
+
+            Border ring = new Border();
+            ring.Width = 25;
+            ring.Height = 25;
+            ring.CornerRadius = new CornerRadius(12.5);
+            ring.BorderBrush = GlassTheme.TextPrimaryBrush;
+            ring.BorderThickness = new Thickness(1.6);
+            clock.Children.Add(ring);
+
+            Border hour = new Border();
+            hour.Width = 1.6;
+            hour.Height = 7;
+            hour.Background = GlassTheme.TextPrimaryBrush;
+            hour.HorizontalAlignment = HorizontalAlignment.Center;
+            hour.VerticalAlignment = VerticalAlignment.Top;
+            hour.Margin = new Thickness(0, 4, 0, 0);
+            hour.CornerRadius = new CornerRadius(0.8);
+            clock.Children.Add(hour);
+
+            Border minute = new Border();
+            minute.Width = 7;
+            minute.Height = 1.6;
+            minute.Background = GlassTheme.TextPrimaryBrush;
+            minute.HorizontalAlignment = HorizontalAlignment.Right;
+            minute.VerticalAlignment = VerticalAlignment.Center;
+            minute.Margin = new Thickness(0, 0, 4, 0);
+            minute.CornerRadius = new CornerRadius(0.8);
+            clock.Children.Add(minute);
+
+            glyph.Child = clock;
+            return glyph;
+        }
+
+        private Grid CreateScheduleSearchBox()
+        {
+            Grid wrapper = new Grid();
+            wrapper.Height = 36;
+
+            TextBox input = new TextBox();
+            input.Height = 36;
+            input.Padding = new Thickness(12, 6, 12, 6);
+            input.VerticalContentAlignment = VerticalAlignment.Center;
+            input.Background = GlassTheme.InputBrush;
+            input.BorderBrush = GlassTheme.InputBorderBrush;
+            input.Foreground = GlassTheme.TextPrimaryBrush;
+            input.CaretBrush = GlassTheme.TextPrimaryBrush;
+            input.ToolTip = "搜索任务名称、目标、类型或执行计划";
+            input.Text = _scheduleSearchText ?? "";
+            input.Style = GetSettingsTextBoxStyle();
+            wrapper.Children.Add(input);
+
+            TextBlock placeholder = GlassTheme.CreateText(
+                "搜索任务名称、路径或执行计划",
+                12,
+                true);
+            placeholder.Margin = new Thickness(13, 0, 13, 0);
+            placeholder.VerticalAlignment = VerticalAlignment.Center;
+            placeholder.IsHitTestVisible = false;
+            placeholder.Visibility = string.IsNullOrEmpty(input.Text)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            wrapper.Children.Add(placeholder);
+
+            input.TextChanged += delegate(object sender, TextChangedEventArgs e)
+            {
+                placeholder.Visibility = string.IsNullOrEmpty(input.Text)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+                ScheduleSearch_TextChanged(sender, e);
+            };
+            return wrapper;
+        }
+
+        private void ScheduleSearch_TextChanged(
+            object sender,
+            TextChangedEventArgs e)
+        {
+            TextBox input = sender as TextBox;
+            _scheduleSearchText = input == null ? "" : (input.Text ?? "");
+            RefreshScheduleList();
+        }
+
+        private bool MatchesScheduleSearch(ScheduledTaskConfig task)
+        {
+            string query = (_scheduleSearchText ?? "").Trim();
+            if (task == null)
+            {
+                return false;
+            }
+
+            if (query.Length == 0)
+            {
+                return true;
+            }
+
+            return ContainsScheduleText(task.Name, query) ||
+                ContainsScheduleText(task.Target, query) ||
+                ContainsScheduleText(GetTaskTypeLabel(task.TaskType), query) ||
+                ContainsScheduleText(DescribeSchedule(task), query);
+        }
+
+        private static void UpdateScheduleCountText(
+            TextBlock target,
+            int totalCount,
+            int visibleCount)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            target.Text = visibleCount < totalCount
+                ? "显示 " + visibleCount.ToString() + " / 共 " +
+                    totalCount.ToString() + " 个任务"
+                : "共 " + totalCount.ToString() + " 个任务";
+        }
+
+        private static bool ContainsScheduleText(string source, string query)
+        {
+            return !string.IsNullOrEmpty(source) &&
+                source.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static Style GetSettingsTextBoxStyle()
+        {
+            if (_settingsTextBoxStyle != null)
+            {
+                return _settingsTextBoxStyle;
+            }
+
+            string xaml =
+                "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
+                "xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' " +
+                "TargetType='{x:Type TextBox}'>" +
+                "<Setter Property='FontFamily' Value='Microsoft YaHei UI'/>" +
+                "<Setter Property='FontSize' Value='12'/>" +
+                "<Setter Property='FocusVisualStyle' Value='{x:Null}'/>" +
+                "<Setter Property='Template'>" +
+                "<Setter.Value>" +
+                "<ControlTemplate TargetType='{x:Type TextBox}'>" +
+                "<Border x:Name='Border' CornerRadius='9' " +
+                "Background='{TemplateBinding Background}' " +
+                "BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1'>" +
+                "<ScrollViewer x:Name='PART_ContentHost' Margin='{TemplateBinding Padding}' " +
+                "VerticalAlignment='Center'/>" +
+                "</Border>" +
+                "<ControlTemplate.Triggers>" +
+                "<Trigger Property='IsMouseOver' Value='True'>" +
+                "<Setter TargetName='Border' Property='BorderBrush' Value='#70FFFFFF'/>" +
+                "</Trigger>" +
+                "<Trigger Property='IsKeyboardFocusWithin' Value='True'>" +
+                "<Setter TargetName='Border' Property='BorderBrush' Value='#A88BE2FF'/>" +
+                "<Setter TargetName='Border' Property='Background' Value='#3A152235'/>" +
+                "</Trigger>" +
+                "</ControlTemplate.Triggers>" +
+                "</ControlTemplate>" +
+                "</Setter.Value>" +
+                "</Setter>" +
+                "</Style>";
+            _settingsTextBoxStyle = (Style)XamlReader.Parse(xaml);
+            return _settingsTextBoxStyle;
+        }
+
+        private void AddScheduledTask_Click(object sender, RoutedEventArgs e)
+        {
+            ScheduledTaskWindow dialog = new ScheduledTaskWindow();
+            dialog.Owner = this;
+            // WPF 的 ShowDialog 会禁用整个应用的窗口（包括桌面分区），改用非模态
+            dialog.NonModal = true;
+            dialog.Closed += delegate
+            {
+                if (!dialog.ResultAccepted || dialog.ResultTask == null)
+                {
+                    return;
+                }
+
+                if (_config.ScheduledTasks == null)
+                {
+                    _config.ScheduledTasks = new List<ScheduledTaskConfig>();
+                }
+
+                _config.ScheduledTasks.Add(dialog.ResultTask);
+                ConfigStore.Save(_config);
+
+                if (_scheduledTasks != null)
+                {
+                    _scheduledTasks.CheckNow();
+                }
+
+                RefreshSchedulePage();
+            };
+            dialog.Show();
+        }
+
+        private void EditScheduledTask_Click(object sender, RoutedEventArgs e)
+        {
+            Button button = sender as Button;
+            ScheduledTaskConfig task = button == null
+                ? null
+                : button.Tag as ScheduledTaskConfig;
+            if (task == null || _config.ScheduledTasks == null)
+            {
+                return;
+            }
+
+            int index = _config.ScheduledTasks.IndexOf(task);
+            if (index < 0)
+            {
+                return;
+            }
+
+            ScheduledTaskWindow dialog = new ScheduledTaskWindow(task);
+            dialog.Owner = this;
+            dialog.NonModal = true;
+            dialog.Closed += delegate
+            {
+                if (!dialog.ResultAccepted || dialog.ResultTask == null)
+                {
+                    return;
+                }
+
+                if (_config.ScheduledTasks == null ||
+                    index >= _config.ScheduledTasks.Count)
+                {
+                    return;
+                }
+
+                _config.ScheduledTasks[index] = dialog.ResultTask;
+                ConfigStore.Save(_config);
+
+                if (_scheduledTasks != null)
+                {
+                    _scheduledTasks.CheckNow();
+                }
+
+                RefreshSchedulePage();
+            };
+            dialog.Show();
+        }
+
+        private void ScheduleEnabled_Changed(object sender, RoutedEventArgs e)
+        {
+            CheckBox checkBox = sender as CheckBox;
+            ScheduledTaskConfig task = checkBox == null
+                ? null
+                : checkBox.Tag as ScheduledTaskConfig;
+            if (task == null)
+            {
+                return;
+            }
+
+            task.Enabled = checkBox.IsChecked == true;
+            ConfigStore.Save(_config);
+
+            if (_scheduledTasks != null)
+            {
+                _scheduledTasks.CheckNow();
+            }
+
+            RefreshSchedulePage();
+        }
+
+        private void RemoveScheduledTask_Click(object sender, RoutedEventArgs e)
+        {
+            Button button = sender as Button;
+            ScheduledTaskConfig task = button == null
+                ? null
+                : button.Tag as ScheduledTaskConfig;
+            if (task == null || _config.ScheduledTasks == null)
+            {
+                return;
+            }
+
+            MessageBoxResult result = MessageBox.Show(
+                "确定删除定时任务“" +
+                (string.IsNullOrWhiteSpace(task.Name) ? "定时任务" : task.Name) +
+                "”吗？",
+                "GhostDesk",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (result != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            _config.ScheduledTasks.Remove(task);
+            ConfigStore.Save(_config);
+            RefreshSchedulePage();
+        }
+
+        private static string GetTaskTypeLabel(string taskType)
+        {
+            if (string.Equals(
+                    taskType,
+                    ScheduledTaskConfig.TypeApplication,
+                    StringComparison.Ordinal))
+            {
+                return "应用";
+            }
+
+            if (string.Equals(
+                    taskType,
+                    ScheduledTaskConfig.TypeUrl,
+                    StringComparison.Ordinal))
+            {
+                return "网址";
+            }
+
+            if (string.Equals(
+                    taskType,
+                    ScheduledTaskConfig.TypeShutdown,
+                    StringComparison.Ordinal))
+            {
+                return "关机";
+            }
+
+            return "文件";
+        }
+
+        private static string DescribeSchedule(ScheduledTaskConfig task)
+        {
+            DateTime firstRun;
+            string firstRunText = "";
+            if (DateTime.TryParse(task.FirstRunUtc, out firstRun))
+            {
+                firstRunText = firstRun.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+            }
+
+            string description;
+            if (string.Equals(
+                    task.ScheduleMode,
+                    ScheduledTaskConfig.ModeDaily,
+                    StringComparison.Ordinal))
+            {
+                description = "每天 " + (task.Time ?? "") +
+                    (firstRunText.Length == 0 ? "" : " · 首次 " + firstRunText);
+            }
+            else if (string.Equals(
+                    task.ScheduleMode,
+                    ScheduledTaskConfig.ModeWeekly,
+                    StringComparison.Ordinal))
+            {
+                description = "每周" + GetWeekdayLabel(task.DayOfWeek) +
+                    " " + (task.Time ?? "") +
+                    (firstRunText.Length == 0 ? "" : " · 首次 " + firstRunText);
+            }
+            else if (string.Equals(
+                    task.ScheduleMode,
+                    ScheduledTaskConfig.ModeInterval,
+                    StringComparison.Ordinal))
+            {
+                description = "每隔 " + task.IntervalMinutes.ToString() +
+                    " 分钟" +
+                    (firstRunText.Length == 0 ? "" : " · 首次 " + firstRunText);
+            }
+            else
+            {
+                description = "一次性 · " +
+                    (firstRunText.Length == 0 ? (task.Time ?? "") : firstRunText);
+            }
+
+            int countdown = ScheduledTaskRunner.GetEffectiveCountdownSeconds(task);
+            if (countdown > 0)
+            {
+                description += " · 提前 " +
+                    countdown.ToString() + " 秒提醒";
+            }
+            else
+            {
+                description += " · 准点执行";
+            }
+
+            return description;
+        }
+
+        private static string GetWeekdayLabel(int dayOfWeek)
+        {
+            string[] names = new string[]
+            {
+                "日", "一", "二", "三", "四", "五", "六"
+            };
+            int index = Math.Max(0, Math.Min(names.Length - 1, dayOfWeek));
+            return names[index];
+        }
+
+        private static string GetTaskTargetText(ScheduledTaskConfig task)
+        {
+            if (string.Equals(
+                    task.TaskType,
+                    ScheduledTaskConfig.TypeShutdown,
+                    StringComparison.Ordinal))
+            {
+                return "";
+            }
+
+            string target = (task.Target ?? "").Trim();
+            if (target.Length == 0)
+            {
+                return "";
+            }
+
+            return "目标：" + target;
         }
 
 
@@ -1635,6 +2375,72 @@ namespace GhostDesk
             {
                 _setAutoStart(_config.AutoStart);
             }
+        }
+
+        private void ShowHiddenFiles_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_showHiddenFilesCheck == null || _suppressVisibilityChange)
+            {
+                return;
+            }
+
+            bool previous = _config.ShowHiddenFiles;
+            bool desired = _showHiddenFilesCheck.IsChecked == true;
+            if (desired == previous)
+            {
+                return;
+            }
+
+            if (desired)
+            {
+                // 只改资源管理器的「显示隐藏文件」设置：文件保持隐藏属性，桌面以半透明样式呈现
+                if (!_config.ExplorerHiddenOriginal.HasValue)
+                {
+                    _config.ExplorerHiddenOriginal = StorageSafety.ReadExplorerHidden();
+                }
+
+                if (StorageSafety.SetExplorerHidden(1))
+                {
+                    _config.ShowHiddenFiles = true;
+                    ConfigStore.Save(_config);
+                    return;
+                }
+            }
+            else
+            {
+                int original = 2;
+                if (_config.ExplorerHiddenOriginal.HasValue &&
+                    _config.ExplorerHiddenOriginal.Value != 0)
+                {
+                    original = _config.ExplorerHiddenOriginal.Value;
+                }
+
+                if (StorageSafety.SetExplorerHidden(original))
+                {
+                    // 关掉「临时查看」时把隐藏属性重新压回去，否则图标会一直露在桌面上
+                    ItemStorage.SynchronizeManagedVisibility(_config, false);
+                    _config.ShowHiddenFiles = false;
+                    _config.ExplorerHiddenOriginal = null;
+                    ConfigStore.Save(_config);
+                    return;
+                }
+            }
+
+            _suppressVisibilityChange = true;
+            try
+            {
+                _showHiddenFilesCheck.IsChecked = previous;
+            }
+            finally
+            {
+                _suppressVisibilityChange = false;
+            }
+
+            MessageBox.Show(
+                "无法修改资源管理器「显示隐藏文件」设置，请稍后重试。",
+                "GhostDesk",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
         }
 
         private void BackupInterval_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)

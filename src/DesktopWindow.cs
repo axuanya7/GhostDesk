@@ -17,6 +17,7 @@ namespace GhostDesk
     internal class DesktopWindow : Window
     {
         private readonly AppConfig _config;
+        private readonly StorageManifest _manifest;
         private readonly List<RegionControl> _regions = new List<RegionControl>();
         private Canvas _root;
         private Canvas _dragLayer;
@@ -73,8 +74,16 @@ namespace GhostDesk
         }
 
         public DesktopWindow(AppConfig config)
+            : this(config, null)
+        {
+        }
+
+        public DesktopWindow(
+            AppConfig config,
+            StorageManifest manifest)
         {
             _config = config;
+            _manifest = manifest;
             InitializeWindow();
             BuildRegions();
 
@@ -96,17 +105,27 @@ namespace GhostDesk
             RegionControl control = new RegionControl(
                 model,
                 RemoveRegion,
-                NotifyConfigChanged,
+                PersistRegionConfigChange,
                 OpenItem,
                 _dragLayer,
                 _config.CollapseHoverTrigger,
                 delegate { return _config.Regions; },
-                AddItemToLaunchRegion);
+                AddItemToLaunchRegion,
+                SynchronizeItemVisibility,
+                _manifest);
             control.SetMoveCallbacks(BeginRegionMove, UpdateRegionMove, EndRegionMove);
             control.SetLayoutChangedCallback(RegionLayoutChanged);
             control.InteractionChanged += RegionInteractionChanged;
             _regions.Add(control);
             _root.Children.Add(control);
+        }
+
+        private bool SynchronizeItemVisibility(DesktopItem item)
+        {
+            return ItemStorage.SynchronizeItemVisibility(
+                _config,
+                item,
+                _config.ShowHiddenFiles);
         }
 
         public void AddItemToLaunchRegion(DesktopItem item, string regionId)
@@ -221,6 +240,7 @@ namespace GhostDesk
                 ApplyMovingGroupPlacement(region);
                 _primaryMovingRegion = null;
                 _movingGroup.Clear();
+                PersistConfigChange();
             }
         }
 
@@ -1348,6 +1368,12 @@ namespace GhostDesk
 
         public void RemoveRegion(RegionControl control)
         {
+            if (control != null &&
+                !RestoreStorageItemsBeforeRegionRemoval(control.Model))
+            {
+                return;
+            }
+
             string dockEdge = control == null
                 ? RegionConfig.DockNone
                 : NormalizeDockEdge(control.Model.DockEdge);
@@ -1370,12 +1396,11 @@ namespace GhostDesk
 
             if (_regions.Remove(control))
             {
-                RestoreDesktopItems(control.Model, true);
                 _pendingHideAtUtc.Remove(control);
                 _config.Regions.Remove(control.Model);
                 _root.Children.Remove(control);
                 ApplyDockLayout(dockEdge);
-                NotifyConfigChanged();
+                PersistConfigChange();
             }
         }
 
@@ -1413,44 +1438,163 @@ namespace GhostDesk
                 Canvas.SetLeft(region, model.X);
                 Canvas.SetTop(region, model.Y);
                 ApplyAllDockLayouts();
-                NotifyConfigChanged();
+                PersistConfigChange();
                 return true;
             }
 
             return false;
         }
 
-        public void SetHiddenFilesVisible(bool visible)
+        private bool RestoreStorageItemsBeforeRegionRemoval(RegionConfig region)
         {
-            foreach (RegionConfig region in _config.Regions)
+            if (region == null)
             {
-                if (region.Items == null)
+                return true;
+            }
+
+            HashSet<string> processed = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            bool failed = false;
+            failed |= RestoreStorageItemsBeforeRegionRemoval(
+                region,
+                region.Items,
+                processed);
+            failed |= RestoreStorageItemsBeforeRegionRemoval(
+                region,
+                region.LaunchItems,
+                processed);
+            return !failed;
+        }
+
+        private bool RestoreStorageItemsBeforeRegionRemoval(
+            RegionConfig region,
+            List<DesktopItem> items,
+            HashSet<string> processed)
+        {
+            if (items == null)
+            {
+                return false;
+            }
+
+            bool failed = false;
+            foreach (DesktopItem item in items)
+            {
+                if (item == null ||
+                    !ItemStorage.IsManagedPath(item.Path))
                 {
                     continue;
                 }
 
-                foreach (DesktopItem item in region.Items)
+                string sourcePath = ItemStorage.NormalizePath(item.Path);
+                if (string.IsNullOrEmpty(sourcePath) ||
+                    !processed.Add(sourcePath) ||
+                    IsStoragePathReferencedOutside(region, sourcePath))
                 {
-                    if (!RegionControl.IsDesktopPath(item.Path) ||
-                        (!File.Exists(item.Path) && !Directory.Exists(item.Path)))
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    try
-                    {
-                        RegionControl.SetDesktopItemVisibility(item.Path, visible);
-                    }
-                    catch
-                    {
-                    }
+                try
+                {
+                    string destination = ItemStorage.MoveToDesktop(item);
+                    UpdateRestoredRegionItemPaths(region, sourcePath, destination);
+                }
+                catch (Exception ex)
+                {
+                    failed = true;
+                    MessageBox.Show(
+                        "无法将这个项目放回桌面，分区已保留：\n" +
+                        item.Name +
+                        "\n\n" +
+                        ex.Message,
+                        "GhostDesk",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+            }
+
+            return failed;
+        }
+
+        private bool IsStoragePathReferencedOutside(
+            RegionConfig sourceRegion,
+            string path)
+        {
+            foreach (RegionConfig region in _config.Regions)
+            {
+                if (region == null || ReferenceEquals(region, sourceRegion))
+                {
+                    continue;
+                }
+
+                if (ContainsStoragePath(region.Items, path) ||
+                    ContainsStoragePath(region.LaunchItems, path))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ContainsStoragePath(
+            List<DesktopItem> items,
+            string path)
+        {
+            if (items == null)
+            {
+                return false;
+            }
+
+            foreach (DesktopItem item in items)
+            {
+                if (item != null &&
+                    string.Equals(
+                        ItemStorage.NormalizePath(item.Path),
+                        path,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void UpdateRestoredRegionItemPaths(
+            RegionConfig region,
+            string sourcePath,
+            string destination)
+        {
+            UpdateRestoredRegionItemPaths(region.Items, sourcePath, destination);
+            UpdateRestoredRegionItemPaths(region.LaunchItems, sourcePath, destination);
+        }
+
+        private static void UpdateRestoredRegionItemPaths(
+            List<DesktopItem> items,
+            string sourcePath,
+            string destination)
+        {
+            if (items == null)
+            {
+                return;
+            }
+
+            foreach (DesktopItem item in items)
+            {
+                if (item != null &&
+                    string.Equals(
+                        ItemStorage.NormalizePath(item.Path),
+                        sourcePath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Path = destination;
+                    item.Name = ItemStorage.GetDisplayNameForPath(destination);
                 }
             }
         }
 
         protected override void OnClosed(EventArgs e)
         {
-            RestoreAllDesktopItems();
             if (_timer != null)
             {
                 _timer.Stop();
@@ -1537,86 +1681,6 @@ namespace GhostDesk
 
             _root.Children.Add(_dragLayer);
             ApplyAllDockLayouts();
-        }
-
-        private void EnsureDesktopItemsHidden()
-        {
-            foreach (RegionConfig region in _config.Regions)
-            {
-                foreach (DesktopItem item in region.Items)
-                {
-                    if (RegionControl.IsDesktopPath(item.Path) &&
-                        (File.Exists(item.Path) || Directory.Exists(item.Path)))
-                    {
-                        try
-                        {
-                            RegionControl.SetDesktopItemVisibility(item.Path, false);
-                        }
-                        catch
-                        {
-                        }
-                    }
-                }
-            }
-        }
-
-        private void RestoreAllDesktopItems()
-        {
-            foreach (RegionConfig region in _config.Regions)
-            {
-                RestoreDesktopItems(region, false);
-            }
-        }
-
-        private void RestoreDesktopItems(RegionConfig region, bool checkOtherRegions)
-        {
-            if (region == null || region.Items == null)
-            {
-                return;
-            }
-
-            foreach (DesktopItem item in region.Items)
-            {
-                if (!RegionControl.IsDesktopPath(item.Path) ||
-                    (!File.Exists(item.Path) && !Directory.Exists(item.Path)))
-                {
-                    continue;
-                }
-
-                if (checkOtherRegions && IsPathInOtherRegions(region, item.Path))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    RegionControl.SetDesktopItemVisibility(item.Path, true);
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private bool IsPathInOtherRegions(RegionConfig sourceRegion, string path)
-        {
-            foreach (RegionConfig region in _config.Regions)
-            {
-                if (ReferenceEquals(region, sourceRegion) || region.Items == null)
-                {
-                    continue;
-                }
-
-                foreach (DesktopItem item in region.Items)
-                {
-                    if (string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
         }
 
         private void DesktopWindow_SourceInitialized(object sender, EventArgs e)
@@ -1869,7 +1933,6 @@ namespace GhostDesk
             {
                 RefreshDesktopLayout();
                 PositionBottom();
-                EnsureDesktopItemsHidden();
 
                 UpdateInputTransparency();
             }));
@@ -2331,6 +2394,43 @@ namespace GhostDesk
             {
                 handler();
             }
+        }
+
+        private bool PersistRegionConfigChange()
+        {
+            if (!ConfigStore.Save(_config))
+            {
+                return false;
+            }
+
+            NotifyConfigChanged();
+            return true;
+        }
+
+        private void PersistConfigChange()
+        {
+            if (ConfigStore.Save(_config))
+            {
+                NotifyConfigChanged();
+                return;
+            }
+
+            if (string.Equals(
+                    Environment.GetEnvironmentVariable(
+                        "GHOSTDESK_TEST_SUPPRESS_DIALOGS"),
+                    "1",
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Exception error = ConfigStore.LastSaveError;
+            MessageBox.Show(
+                "配置保存失败：\n" +
+                (error == null ? "未知错误。" : error.Message),
+                "GhostDesk",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
         }
     }
 }

@@ -26,11 +26,13 @@ namespace GhostDesk
 
         private readonly RegionConfig _model;
         private readonly Action<RegionControl> _removeCallback;
-        private readonly Action _changeCallback;
+        private readonly Func<bool> _changeCallback;
         private readonly Action<DesktopItem> _openCallback;
         private readonly Canvas _dragLayer;
         private readonly Func<List<RegionConfig>> _launchTargetsProvider;
         private readonly Action<DesktopItem, string> _addToLaunchCallback;
+        private readonly Func<DesktopItem, bool> _synchronizeVisibilityCallback;
+        private readonly StorageManifest _manifest;
 
         private WrapPanel _itemsHost;
         private ScrollViewer _itemsScroll;
@@ -86,7 +88,6 @@ namespace GhostDesk
         private bool _reorderFrameQueued;
         private TimeSpan? _lastReorderRenderingTime;
         private List<DesktopItemControl> _dragPreviewOrder;
-        private readonly List<string> _dragHiddenDesktopPaths = new List<string>();
         private readonly Dictionary<DesktopItemControl, Point> _itemTargetOffsets =
             new Dictionary<DesktopItemControl, Point>();
         private readonly Dictionary<DesktopItemControl, IconOffsetMotion> _itemOffsetMotions =
@@ -227,12 +228,14 @@ namespace GhostDesk
         public RegionControl(
             RegionConfig model,
             Action<RegionControl> removeCallback,
-            Action changeCallback,
+            Func<bool> changeCallback,
             Action<DesktopItem> openCallback,
             Canvas dragLayer,
             string collapseHoverTrigger,
             Func<List<RegionConfig>> launchTargetsProvider,
-            Action<DesktopItem, string> addToLaunchCallback)
+            Action<DesktopItem, string> addToLaunchCallback,
+            Func<DesktopItem, bool> synchronizeVisibilityCallback,
+            StorageManifest manifest)
         {
             _model = model;
             _removeCallback = removeCallback;
@@ -241,6 +244,8 @@ namespace GhostDesk
             _dragLayer = dragLayer;
             _launchTargetsProvider = launchTargetsProvider;
             _addToLaunchCallback = addToLaunchCallback;
+            _synchronizeVisibilityCallback = synchronizeVisibilityCallback;
+            _manifest = manifest;
             SetCollapseHoverTrigger(collapseHoverTrigger);
 
             Width = model.Width;
@@ -300,6 +305,7 @@ namespace GhostDesk
                     RemoveItem,
                     ShowItemLocation,
                     ItemChanged,
+                    RestoreItemToDesktop,
                     _addToLaunchCallback,
                     _launchTargetsProvider,
                     showExtensions);
@@ -315,6 +321,180 @@ namespace GhostDesk
             NotifyChanged();
         }
 
+        private bool RestoreItemToDesktop(DesktopItem item)
+        {
+            int index = item == null ? -1 : _model.Items.IndexOf(item);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            string storedPath = ItemStorage.NormalizePath(item.Path);
+            bool legacyManaged = !string.IsNullOrEmpty(storedPath) &&
+                ItemStorage.IsManagedPath(storedPath) &&
+                (File.Exists(storedPath) || Directory.Exists(storedPath));
+
+            if (legacyManaged)
+            {
+                return RestoreLegacyStoredItem(item, index, storedPath);
+            }
+
+            // 新语义：文件一直在桌面原地，放回桌面 = 移除引用 + 恢复可见性
+            _model.Items.RemoveAt(index);
+            RefreshItems();
+
+            if (!SynchronizeVisibility(item))
+            {
+                _model.Items.Insert(
+                    Math.Min(index, _model.Items.Count),
+                    item);
+                RefreshItems();
+                ShowOperationError(
+                    "无法恢复文件显示状态，分区记录已保留。\n" +
+                    "文件路径和内容均未改动。",
+                    "GhostDesk");
+                return false;
+            }
+
+            if (NotifyChanged())
+            {
+                return true;
+            }
+
+            _model.Items.Insert(
+                Math.Min(index, _model.Items.Count),
+                item);
+            RefreshItems();
+            SynchronizeVisibility(item);
+
+            ShowOperationError(
+                "配置未保存，分区项目未移除。\n" +
+                "\n" + GetSaveErrorText(),
+                "GhostDesk");
+
+            return false;
+        }
+
+        private bool RestoreLegacyStoredItem(
+            DesktopItem item,
+            int index,
+            string storedPath)
+        {
+            string destination = null;
+            try
+            {
+                destination = ItemStorage.MoveToDesktop(item);
+                StorageSafety.ClearHiddenAttribute(destination);
+                if (_manifest != null)
+                {
+                    _manifest.Remove(storedPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowOperationError(
+                    "无法把文件放回桌面，分区记录已保留。\n" +
+                    item.Name + "\n\n" + ex.Message,
+                    "GhostDesk");
+                return false;
+            }
+
+            _model.Items.RemoveAt(index);
+            RefreshItems();
+
+            if (NotifyChanged())
+            {
+                return true;
+            }
+
+            _model.Items.Insert(
+                Math.Min(index, _model.Items.Count),
+                item);
+            RefreshItems();
+            try
+            {
+                ItemStorage.RollbackMovedPath(
+                    destination,
+                    storedPath);
+                if (_manifest != null &&
+                    !string.IsNullOrEmpty(item.OriginalPath))
+                {
+                    _manifest.Add(
+                        storedPath,
+                        item.OriginalPath,
+                        Directory.Exists(storedPath));
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowOperationError(
+                    "配置未保存，但文件回滚失败。\n" +
+                    "请手动检查：\n" + destination +
+                    "\n\n" + ex.Message,
+                    "GhostDesk");
+            }
+
+            ShowOperationError(
+                "配置未保存，分区项目未移除。\n" +
+                "\n" + GetSaveErrorText(),
+                "GhostDesk");
+
+            return false;
+        }
+
+        private bool SynchronizeVisibility(DesktopItem item)
+        {
+            if (_synchronizeVisibilityCallback == null)
+            {
+                return true;
+            }
+
+            return _synchronizeVisibilityCallback(item);
+        }
+
+        private static string GetSaveErrorText()
+        {
+            Exception error = ConfigStore.LastSaveError;
+            return error == null
+                ? "配置文件未能写入。"
+                : "配置保存错误：" + error.Message;
+        }
+
+        private static void ShowMoveWarning()
+        {
+            if (string.IsNullOrWhiteSpace(ItemStorage.LastMoveWarning))
+            {
+                return;
+            }
+
+            ShowOperationError(
+                ItemStorage.LastMoveWarning,
+                "GhostDesk");
+        }
+
+        private static void ShowOperationError(string message, string title)
+        {
+            if (string.Equals(
+                    Environment.GetEnvironmentVariable(
+                        "GHOSTDESK_TEST_SUPPRESS_DIALOGS"),
+                    "1",
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            MessageBox.Show(
+                message,
+                title,
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+
+        private static void ShowStorageWarning(string message)
+        {
+            ShowOperationError(message, "GhostDesk");
+        }
+
         public void AddPath(string path)
         {
             if (string.IsNullOrEmpty(path))
@@ -322,77 +502,115 @@ namespace GhostDesk
                 return;
             }
 
-            string normalized = Path.GetFullPath(path);
-            bool desktopPath = IsDesktopPath(normalized);
+            string normalized = ItemStorage.NormalizePath(path);
+            if (string.IsNullOrEmpty(normalized))
+            {
+                return;
+            }
 
             foreach (DesktopItem existing in _model.Items)
             {
-                if (string.Equals(existing.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
-                    (!desktopPath && DesktopItemControl.IsShortcutPointingToPath(existing.Path, normalized)))
+                if (existing != null &&
+                    string.Equals(
+                        ItemStorage.NormalizePath(existing.Path),
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     return;
                 }
             }
 
-            if (!desktopPath &&
-                !DesktopItemControl.IsShortcutPath(normalized) &&
-                (File.Exists(normalized) || Directory.Exists(normalized)))
+            string blockReason;
+            if (StorageSafety.IsOnPublicDesktop(normalized))
             {
-                try
+                ShowStorageWarning(
+                    "该文件位于公共桌面，普通用户无权限修改。请以管理员身份运行 GhostDesk 后再收纳。");
+                return;
+            }
+
+            if (!StorageSafety.TryProbeFree(normalized, out blockReason))
+            {
+                ShowStorageWarning(
+                    "文件正被占用，请关闭相关程序后重试：" + blockReason);
+                return;
+            }
+
+            // 新语义：只记录引用。
+            // - 桌面上的项目：就地加「隐藏」属性（收纳效果），引用原始文件本身。
+            // - 桌面以外的项目：在它所在目录创建快捷方式，分区引用这份快捷方式，
+            //   绝不改动原始文件，避免重命名/删除操作伤到源文件。
+            bool onDesktop = StorageSafety.IsOnUserDesktop(normalized) ||
+                StorageSafety.IsOnPublicDesktop(normalized);
+            string referencePath = normalized;
+            string sourcePath = "";
+            if (!onDesktop &&
+                !normalized.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+            {
+                string shortcutError;
+                string linkPath = ItemStorage.CreateShortcutFor(
+                    normalized,
+                    out shortcutError);
+                if (string.IsNullOrEmpty(linkPath))
                 {
-                    normalized = DesktopItemControl.CreateManagedShortcutForExternalPath(normalized);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(
-                        "创建快捷方式失败：\n" + ex.Message,
-                        "GhostDesk",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
+                    ShowStorageWarning(
+                        "无法为该项目创建快捷方式：\n" + normalized + "\n\n" +
+                        (shortcutError ?? ""));
                     return;
                 }
+
+                referencePath = linkPath;
+                sourcePath = normalized;
             }
 
-            string type = "file";
-            string name = Path.GetFileName(normalized);
-            if (Directory.Exists(normalized))
+            bool wasHidden = onDesktop && ItemStorage.IsHidden(referencePath);
+            string hideReason = null;
+            bool hiddenOk = true;
+            if (onDesktop)
             {
-                type = "folder";
-                name = Path.GetFileName(normalized.TrimEnd('\\'));
-            }
-            else if (DesktopItemControl.IsShortcutPath(normalized))
-            {
-                type = "shortcut";
-                name = Path.GetFileNameWithoutExtension(normalized);
+                hiddenOk = StorageSafety.SetHiddenAttribute(
+                    referencePath,
+                    false,
+                    out hideReason);
             }
 
-            if (desktopPath)
+            DesktopItem addedItem = new DesktopItem
             {
-                try
-                {
-                    SetDesktopItemVisibility(normalized, false);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(
-                        "桌面图标隐藏失败：\n" + ex.Message,
-                        "GhostDesk",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
-                    return;
-                }
-            }
-
-            _model.Items.Add(new DesktopItem
-            {
-                Type = type,
-                Path = normalized,
-                Name = string.IsNullOrEmpty(name) ? "未命名" : name,
-                ExternalReference = !desktopPath && !DesktopItemControl.IsShortcutPath(normalized)
-            });
+                Type = ItemStorage.InferType(referencePath),
+                Path = referencePath,
+                OriginalPath = sourcePath,
+                Name = ItemStorage.GetDisplayNameForPath(referencePath),
+                ExternalReference = false,
+                HiddenByGhostDesk = onDesktop && hiddenOk,
+                HiddenBeforeGhostDesk = wasHidden
+            };
+            _model.Items.Add(addedItem);
 
             RefreshItems();
-            NotifyChanged();
+            if (NotifyChanged())
+            {
+                // 按当前「显示隐藏文件」开关再同步一次（失败不阻塞收纳）
+                SynchronizeVisibility(addedItem);
+
+                if (!hiddenOk)
+                {
+                    ShowStorageWarning(
+                        "已加入分区，但隐藏桌面图标失败：\n" +
+                        normalized + "\n\n" + hideReason);
+                }
+
+                return;
+            }
+
+            _model.Items.Remove(addedItem);
+            RefreshItems();
+            if (hiddenOk && !wasHidden && onDesktop)
+            {
+                StorageSafety.ClearHiddenAttribute(referencePath);
+            }
+
+            ShowOperationError(
+                "配置未保存，收纳操作已回滚。\n\n" + GetSaveErrorText(),
+                "GhostDesk");
         }
 
         public void SetHidden(bool hidden, double fadeSeconds)
@@ -599,7 +817,6 @@ namespace GhostDesk
             RefreshItems();
 
             DragOver += Region_DragOver;
-            DragLeave += Region_DragLeave;
             Drop += Region_Drop;
             MouseEnter += Region_MouseEnter;
             MouseLeave += Region_MouseLeave;
@@ -635,9 +852,13 @@ namespace GhostDesk
             menu.StaysOpen = false;
             GlassTheme.ApplyContextMenuStyle(menu);
 
-            MenuItem addFile = new MenuItem { Header = "添加文件或快捷方式..." };
+            MenuItem addFile = new MenuItem { Header = "添加快捷方式..." };
             addFile.Click += AddFile_Click;
             menu.Items.Add(addFile);
+
+            MenuItem addFolder = new MenuItem { Header = "添加文件夹..." };
+            addFolder.Click += AddFolder_Click;
+            menu.Items.Add(addFolder);
 
             MenuItem create = new MenuItem { Header = "新建" };
             MenuItem createFolder = new MenuItem { Header = "文件夹" };
@@ -675,64 +896,6 @@ namespace GhostDesk
             NotifyChanged();
         }
 
-        private void Region_DragLeave(object sender, DragEventArgs e)
-        {
-            RestoreDragHiddenDesktopFiles();
-        }
-
-        private void HideDraggedDesktopFiles(DragEventArgs e)
-        {
-            if (!e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                return;
-            }
-
-            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files == null)
-            {
-                return;
-            }
-
-            foreach (string file in files)
-            {
-                if (string.IsNullOrEmpty(file) || !IsDesktopPath(file) ||
-                    (!File.Exists(file) && !Directory.Exists(file)) ||
-                    _dragHiddenDesktopPaths.Contains(file))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    SetDesktopItemVisibility(file, false);
-                    _dragHiddenDesktopPaths.Add(file);
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private void RestoreDragHiddenDesktopFiles()
-        {
-            for (int i = _dragHiddenDesktopPaths.Count - 1; i >= 0; i--)
-            {
-                string path = _dragHiddenDesktopPaths[i];
-                try
-                {
-                    if (File.Exists(path) || Directory.Exists(path))
-                    {
-                        SetDesktopItemVisibility(path, true);
-                    }
-                }
-                catch
-                {
-                }
-            }
-
-            _dragHiddenDesktopPaths.Clear();
-        }
-
         private void AddFile_Click(object sender, RoutedEventArgs e)
         {
             Microsoft.Win32.OpenFileDialog dialog = new Microsoft.Win32.OpenFileDialog();
@@ -750,6 +913,82 @@ namespace GhostDesk
             }
         }
 
+        private void AddFolder_Click(object sender, RoutedEventArgs e)
+        {
+            string selected = PickFolder(Window.GetWindow(this), "选择要加入分区的文件夹");
+            if (!string.IsNullOrEmpty(selected))
+            {
+                AddPath(selected);
+            }
+        }
+
+        private sealed class WindowOwnerHandle : System.Windows.Forms.IWin32Window
+        {
+            private readonly IntPtr _handle;
+
+            public WindowOwnerHandle(IntPtr handle)
+            {
+                _handle = handle;
+            }
+
+            public IntPtr Handle
+            {
+                get { return _handle; }
+            }
+        }
+
+        /// <summary>
+        /// 弹出文件夹选择框，并保证它显示在 GhostDesk 的置顶窗口之上。
+        /// </summary>
+        private static string PickFolder(Window owner, string description)
+        {
+            bool restoreTopmost = false;
+            try
+            {
+                using (System.Windows.Forms.FolderBrowserDialog dialog =
+                    new System.Windows.Forms.FolderBrowserDialog())
+                {
+                    dialog.Description = description;
+                    dialog.ShowNewFolderButton = false;
+
+                    System.Windows.Forms.IWin32Window ownerHandle = null;
+                    if (owner != null)
+                    {
+                        // 置顶窗口会盖住对话框，弹框期间临时取消置顶
+                        if (owner.Topmost)
+                        {
+                            owner.Topmost = false;
+                            restoreTopmost = true;
+                        }
+
+                        IntPtr handle = new System.Windows.Interop.WindowInteropHelper(owner).Handle;
+                        if (handle != IntPtr.Zero)
+                        {
+                            ownerHandle = new WindowOwnerHandle(handle);
+                        }
+                    }
+
+                    System.Windows.Forms.DialogResult result = ownerHandle == null
+                        ? dialog.ShowDialog()
+                        : dialog.ShowDialog(ownerHandle);
+
+                    if (result != System.Windows.Forms.DialogResult.OK)
+                    {
+                        return null;
+                    }
+
+                    return dialog.SelectedPath;
+                }
+            }
+            finally
+            {
+                if (restoreTopmost && owner != null)
+                {
+                    owner.Topmost = true;
+                }
+            }
+        }
+
         private void NewFolder_Click(object sender, RoutedEventArgs e)
         {
             CreateDesktopItem("新建文件夹", "", true);
@@ -762,70 +1001,22 @@ namespace GhostDesk
 
         private void CreateDesktopItem(string baseName, string extension, bool isFolder)
         {
-            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            if (string.IsNullOrEmpty(desktop) || !Directory.Exists(desktop))
+            try
+            {
+                string path = ItemStorage.CreateUniqueItemPath(
+                    baseName,
+                    extension,
+                    isFolder);
+                AddPath(path);
+            }
+            catch (Exception ex)
             {
                 MessageBox.Show(
-                    "无法找到当前用户的桌面文件夹。",
+                    "新建项目失败：\n" + ex.Message,
                     "GhostDesk",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
-                return;
             }
-
-            for (int index = 1; index <= 9999; index++)
-            {
-                string fileName = index == 1
-                    ? baseName + extension
-                    : string.Format("{0} ({1}){2}", baseName, index, extension);
-                string path = Path.Combine(desktop, fileName);
-
-                if (File.Exists(path) || Directory.Exists(path))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    if (isFolder)
-                    {
-                        Directory.CreateDirectory(path);
-                    }
-                    else
-                    {
-                        using (FileStream stream = new FileStream(
-                            path,
-                            FileMode.CreateNew,
-                            FileAccess.Write,
-                            FileShare.None))
-                        {
-                        }
-                    }
-
-                    AddPath(path);
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    if (File.Exists(path) || Directory.Exists(path))
-                    {
-                        continue;
-                    }
-
-                    MessageBox.Show(
-                        "新建项目失败：\n" + ex.Message,
-                        "GhostDesk",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
-                    return;
-                }
-            }
-
-            MessageBox.Show(
-                "无法为新建项目生成可用名称。",
-                "GhostDesk",
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
         }
 
         private void Rename_Click(object sender, RoutedEventArgs e)
@@ -1461,10 +1652,10 @@ namespace GhostDesk
             {
                 Type = item.Type,
                 Path = item.Path,
+                OriginalPath = item.OriginalPath,
                 Name = item.Name,
                 Aliases = item.Aliases,
-                IconPath = item.IconPath,
-                ExternalReference = item.ExternalReference
+                IconPath = item.IconPath
             };
         }
 
@@ -1493,8 +1684,7 @@ namespace GhostDesk
 
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
-                HideDraggedDesktopFiles(e);
-                e.Effects = DragDropEffects.Copy;
+                e.Effects = DragDropEffects.Move;
                 e.Handled = true;
             }
         }
@@ -1538,8 +1728,7 @@ namespace GhostDesk
             {
                 AddPath(file);
             }
-            _dragHiddenDesktopPaths.Clear();
-            e.Effects = DragDropEffects.Copy;
+            e.Effects = DragDropEffects.Move;
             e.Handled = true;
         }
 
@@ -2195,27 +2384,32 @@ namespace GhostDesk
             };
             DataObject data = new DataObject();
             data.SetData(ItemDragFormat, payload);
-            if (!string.IsNullOrWhiteSpace(source.Model.Path) &&
+            if (ItemStorage.IsManagedPath(source.Model.Path) &&
                 (File.Exists(source.Model.Path) || Directory.Exists(source.Model.Path)))
             {
-                if (!source.Model.ExternalReference &&
-                    !IsDesktopPath(source.Model.Path))
-                {
-                    StringCollection files = new StringCollection();
-                    files.Add(source.Model.Path);
-                    data.SetFileDropList(files);
-                }
+                // 拖到桌面前先摘掉 HIDDEN/SYSTEM，否则外壳移动后会留下一个看不见的桌面文件
+                ItemStorage.ClearHiddenSystemAttributes(source.Model.Path);
+                StringCollection files = new StringCollection();
+                files.Add(source.Model.Path);
+                data.SetFileDropList(files);
             }
 
             ReleaseInternalDragCapture();
             DetachInternalDragInputHandlers();
 
+            bool escapePressed = false;
             QueryContinueDragEventHandler continueDrag = delegate(object sender, QueryContinueDragEventArgs e)
             {
                 if (!_internalDragActive || source == null)
                 {
                     e.Action = DragAction.Cancel;
                     e.Handled = true;
+                    return;
+                }
+
+                if (e.EscapePressed)
+                {
+                    escapePressed = true;
                     return;
                 }
 
@@ -2281,39 +2475,39 @@ namespace GhostDesk
                     DesktopItem item = source.Model;
                     Point cursor = GetCursorScreenPoint();
                     bool outside = !ContainsScreenPoint(cursor);
-                    bool overDesktop = outside && IsCursorOverDesktop();
-                    bool externalRestored = false;
-                    bool shouldRemove = false;
-
-                    if (!payload.Dropped &&
-                        outside &&
-                        item != null &&
-                        item.ExternalReference &&
-                        overDesktop)
-                    {
-                        externalRestored = source.CreateDesktopShortcutForExternalReference();
-                    }
-
-                    shouldRemove = _internalDragActive &&
-                        session == _internalDragSession &&
-                        effect != DragDropEffects.None &&
-                        !payload.Dropped &&
-                        outside;
-                    if (!shouldRemove &&
+                    bool externalMoveCommitted =
+                        ItemStorage.WasExternalMoveCommitted(item);
+                    bool shouldRemove =
                         _internalDragActive &&
                         session == _internalDragSession &&
-                        !payload.Dropped &&
-                        outside &&
-                        IsDesktopPath(source.Model.Path) &&
-                        overDesktop)
-                    {
-                        shouldRemove = true;
-                    }
+                        ShouldRemoveItemAfterExternalDrop(
+                            item,
+                            effect,
+                            escapePressed,
+                            payload.Dropped,
+                            outside,
+                            IsCursorOverDesktopTarget(),
+                            externalMoveCommitted);
                     EndInternalDrag();
-                    if ((externalRestored || shouldRemove) && item != null)
+                    if (shouldRemove && item != null)
                     {
-                        RemoveItem(item);
+                        if (IsExternalDesktopReference(item))
+                        {
+                            RemoveItemAfterDesktopDrop(item);
+                        }
+                        else
+                        {
+                            RemoveItem(item);
+                        }
                     }
+
+                }
+
+                // 文件没被拖走（取消/复制/拖回窗口）时，把隐藏属性恢复回去
+                DesktopItem remaining = source.Model;
+                if (remaining != null && _model.Items.Contains(remaining))
+                {
+                    SynchronizeVisibility(remaining);
                 }
             }
         }
@@ -2456,7 +2650,30 @@ namespace GhostDesk
             return new Point(cursor.X, cursor.Y);
         }
 
+        internal bool IsCursorOverDesktopTarget()
+        {
+            IntPtr overlayWindow = IntPtr.Zero;
+            try
+            {
+                Window owner = Window.GetWindow(this);
+                if (owner != null)
+                {
+                    overlayWindow = new WindowInteropHelper(owner).Handle;
+                }
+            }
+            catch
+            {
+            }
+
+            return IsCursorOverDesktop(overlayWindow);
+        }
+
         internal static bool IsCursorOverDesktop()
+        {
+            return IsCursorOverDesktop(IntPtr.Zero);
+        }
+
+        private static bool IsCursorOverDesktop(IntPtr overlayWindow)
         {
             System.Drawing.Point cursor = System.Windows.Forms.Cursor.Position;
             NativeMethods.POINT point = new NativeMethods.POINT
@@ -2472,8 +2689,33 @@ namespace GhostDesk
                 root = window;
             }
 
+            return IsDesktopDropWindow(window, root, overlayWindow);
+        }
+
+        internal static bool IsDesktopDropWindow(
+            IntPtr windowAtPoint,
+            IntPtr rootAtPoint,
+            IntPtr overlayWindow)
+        {
+            if (overlayWindow != IntPtr.Zero &&
+                (windowAtPoint == overlayWindow || rootAtPoint == overlayWindow))
+            {
+                return true;
+            }
+
+            return IsDesktopShellWindow(windowAtPoint) ||
+                IsDesktopShellWindow(rootAtPoint);
+        }
+
+        private static bool IsDesktopShellWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero)
+            {
+                return false;
+            }
+
             StringBuilder className = new StringBuilder(256);
-            NativeMethods.GetClassName(root, className, className.Capacity);
+            NativeMethods.GetClassName(hwnd, className, className.Capacity);
             string value = className.ToString();
             return value == "Progman" || value == "WorkerW" || value == "SHELLDLL_DefView";
         }
@@ -2744,30 +2986,94 @@ namespace GhostDesk
                 return;
             }
 
-            if (IsDesktopPath(item.Path))
-            {
-                try
-                {
-                    SetDesktopItemVisibility(item.Path, true);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(
-                        "从分区移除失败：\n" + ex.Message,
-                        "GhostDesk",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
-                    return;
-                }
-            }
-
-            if (!_model.Items.Remove(item))
+            int index = _model.Items.IndexOf(item);
+            if (index < 0 || !_model.Items.Remove(item))
             {
                 return;
             }
 
+            // 拖到桌面后 Storage 里那份已经被外壳移走，清单里的旧行同步销账
+            if (_manifest != null &&
+                !string.IsNullOrWhiteSpace(item.Path) &&
+                !File.Exists(item.Path) &&
+                !Directory.Exists(item.Path))
+            {
+                _manifest.Remove(item.Path);
+            }
+
             RefreshItems();
-            NotifyChanged();
+
+            // 移除分区项 = 不再收纳，恢复文件可见性（原本隐藏的保持隐藏）
+            if (!SynchronizeVisibility(item))
+            {
+                _model.Items.Insert(
+                    Math.Min(index, _model.Items.Count),
+                    item);
+                RefreshItems();
+                ShowOperationError(
+                    "无法恢复文件显示状态，分区记录已保留。\n" +
+                    "文件路径和内容均未改动。",
+                    "GhostDesk");
+                return;
+            }
+
+            if (NotifyChanged())
+            {
+                return;
+            }
+
+            _model.Items.Insert(
+                Math.Min(index, _model.Items.Count),
+                item);
+            RefreshItems();
+            SynchronizeVisibility(item);
+            ShowOperationError(
+                "配置未保存，分区项目未移除。\n\n" +
+                GetSaveErrorText(),
+                "GhostDesk");
+        }
+
+        private bool RemoveItemAfterDesktopDrop(DesktopItem item)
+        {
+            int index = item == null ? -1 : _model.Items.IndexOf(item);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            _model.Items.RemoveAt(index);
+            RefreshItems();
+
+            // 拖回桌面 = 移除引用 + 恢复可见性（原本就是隐藏的则保持隐藏）
+            if (!SynchronizeVisibility(item))
+            {
+                _model.Items.Insert(
+                    Math.Min(index, _model.Items.Count),
+                    item);
+                RefreshItems();
+                ShowOperationError(
+                    "无法恢复文件显示状态，分区记录已保留。\n" +
+                    "文件路径和内容均未改动。",
+                    "GhostDesk");
+                return false;
+            }
+
+            if (NotifyChanged())
+            {
+                return true;
+            }
+
+            _model.Items.Insert(
+                Math.Min(index, _model.Items.Count),
+                item);
+            RefreshItems();
+            SynchronizeVisibility(item);
+            ShowOperationError(
+                "配置未保存，分区项目未移除。\n" +
+                "桌面文件未做任何改动。\n\n" +
+                GetSaveErrorText(),
+                "GhostDesk");
+            return false;
         }
 
         private void ShowItemLocation(DesktopItem item)
@@ -2833,8 +3139,25 @@ namespace GhostDesk
                 return false;
             }
 
-            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string desktop = Environment.GetEnvironmentVariable(
+                "GHOSTDESK_TEST_DESKTOP_DIR");
+            if (string.IsNullOrWhiteSpace(desktop))
+            {
+                desktop = Environment.GetFolderPath(
+                    Environment.SpecialFolder.Desktop);
+            }
+
             if (string.IsNullOrEmpty(desktop))
+            {
+                return false;
+            }
+
+            try
+            {
+                desktop = Path.GetFullPath(desktop.Trim());
+                path = Path.GetFullPath(path.Trim());
+            }
+            catch
             {
                 return false;
             }
@@ -2844,39 +3167,36 @@ namespace GhostDesk
             return normalized.StartsWith(normalizedDesktop + "\\", StringComparison.OrdinalIgnoreCase);
         }
 
-        internal static void SetDesktopItemVisibility(string path, bool visible)
+        internal static bool IsExternalDesktopReference(DesktopItem item)
         {
-            if (!File.Exists(path) && !Directory.Exists(path))
+            return item != null &&
+                !string.IsNullOrWhiteSpace(item.Path) &&
+                !item.Path.StartsWith(
+                    "shell:",
+                    StringComparison.OrdinalIgnoreCase) &&
+                !ItemStorage.IsManagedPath(item.Path) &&
+                IsDesktopPath(item.Path);
+        }
+
+        internal static bool ShouldRemoveItemAfterExternalDrop(
+            DesktopItem item,
+            DragDropEffects effect,
+            bool escapePressed,
+            bool droppedInsideRegion,
+            bool outsideRegion,
+            bool overDesktop,
+            bool externalMoveCommitted)
+        {
+            if (item == null ||
+                escapePressed ||
+                droppedInsideRegion ||
+                !outsideRegion)
             {
-                return;
+                return false;
             }
 
-            FileAttributes attributes = File.GetAttributes(path);
-            if (visible)
-            {
-                attributes &= ~(FileAttributes.Hidden | FileAttributes.System);
-            }
-            else
-            {
-                attributes |= FileAttributes.Hidden | FileAttributes.System;
-            }
-
-            File.SetAttributes(path, attributes);
-            NativeMethods.SHChangeNotify(
-                NativeMethods.SHCNE_UPDATEITEM,
-                NativeMethods.SHCNF_PATHW,
-                path,
-                IntPtr.Zero);
-
-            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            if (!string.IsNullOrEmpty(desktop))
-            {
-                NativeMethods.SHChangeNotify(
-                    NativeMethods.SHCNE_UPDATEDIR,
-                    NativeMethods.SHCNF_PATHW,
-                    desktop,
-                    IntPtr.Zero);
-            }
+            // 拖出分区范围：移除引用。桌面上的项顺带恢复可见；外部路径的项只删记录。
+            return true;
         }
 
         internal bool ContainsScreenPoint(Point screenPoint)
@@ -2893,12 +3213,14 @@ namespace GhostDesk
             }
         }
 
-        private void NotifyChanged()
+        private bool NotifyChanged()
         {
             if (_changeCallback != null)
             {
-                _changeCallback();
+                return _changeCallback();
             }
+
+            return true;
         }
 
         private bool ShouldShowExtensions()
@@ -3022,6 +3344,7 @@ namespace GhostDesk
         private readonly Action<DesktopItem> _removeCallback;
         private readonly Action<DesktopItem> _locateCallback;
         private readonly Action _itemsChangedCallback;
+        private readonly Func<DesktopItem, bool> _restoreToDesktopCallback;
         private readonly Action<DesktopItem, string> _addToLaunchCallback;
         private readonly Func<List<RegionConfig>> _launchTargetsProvider;
         private readonly bool _showExtensions;
@@ -3045,6 +3368,7 @@ namespace GhostDesk
             Action<DesktopItem> removeCallback,
             Action<DesktopItem> locateCallback,
             Action itemsChangedCallback,
+            Func<DesktopItem, bool> restoreToDesktopCallback,
             Action<DesktopItem, string> addToLaunchCallback,
             Func<List<RegionConfig>> launchTargetsProvider,
             bool showExtensions)
@@ -3054,6 +3378,7 @@ namespace GhostDesk
             _removeCallback = removeCallback;
             _locateCallback = locateCallback;
             _itemsChangedCallback = itemsChangedCallback;
+            _restoreToDesktopCallback = restoreToDesktopCallback;
             _addToLaunchCallback = addToLaunchCallback;
             _launchTargetsProvider = launchTargetsProvider;
             _showExtensions = showExtensions;
@@ -3179,8 +3504,16 @@ namespace GhostDesk
                 recycle.Click += DeleteToRecycleBin_Click;
                 menu.Items.Add(recycle);
 
-                restore = new MenuItem { Header = "放回桌面" };
-                restore.Click += RestoreToDesktop_Click;
+                if (RegionControl.IsExternalDesktopReference(_model))
+                {
+                    restore = new MenuItem { Header = "放回桌面" };
+                    restore.Click += RestoreToDesktop_Click;
+                }
+                else
+                {
+                    restore = new MenuItem { Header = "放回源路径" };
+                    restore.Click += ReturnToSource_Click;
+                }
             }
 
             if (_addToLaunchCallback != null)
@@ -3334,7 +3667,8 @@ namespace GhostDesk
 
         private void RenameItem_Click(object sender, RoutedEventArgs e)
         {
-            if (IsShellItem() || !File.Exists(_model.Path) && !Directory.Exists(_model.Path))
+            if (IsShellItem() ||
+                (!File.Exists(_model.Path) && !Directory.Exists(_model.Path)))
             {
                 return;
             }
@@ -3386,24 +3720,6 @@ namespace GhostDesk
             }
 
             string newName = string.IsNullOrWhiteSpace(value) ? oldName : value.Trim();
-            if (_model.ExternalReference)
-            {
-                try
-                {
-                    string managedShortcut = CreateManagedShortcutForExternalPath(_model.Path);
-                    _model.Path = managedShortcut;
-                    _model.Type = "shortcut";
-                    _model.Name = Path.GetFileNameWithoutExtension(managedShortcut);
-                    _model.ExternalReference = false;
-                    changed = true;
-                }
-                catch (Exception ex)
-                {
-                    ShowError("创建受管快捷方式失败", ex);
-                    return;
-                }
-            }
-
             string oldFileName = Path.GetFileName(_model.Path);
             string newFileName = ResolveRenameFileName(newName, oldFileName);
             string directory = Path.GetDirectoryName(_model.Path);
@@ -3448,11 +3764,6 @@ namespace GhostDesk
 
                     _model.Path = newPath;
                     _model.Name = GetModelNameForPath(newPath);
-                    if (RegionControl.IsDesktopPath(newPath))
-                    {
-                        RegionControl.SetDesktopItemVisibility(newPath, false);
-                    }
-
                     changed = true;
                 }
                 catch (Exception ex)
@@ -3560,7 +3871,8 @@ namespace GhostDesk
 
         private void RestoreToDesktop_Click(object sender, RoutedEventArgs e)
         {
-            if (IsShellItem() || !File.Exists(_model.Path) && !Directory.Exists(_model.Path))
+            if (IsShellItem() ||
+                (!File.Exists(_model.Path) && !Directory.Exists(_model.Path)))
             {
                 return;
             }
@@ -3571,74 +3883,79 @@ namespace GhostDesk
                 menu.IsOpen = false;
             }
 
+            if (_restoreToDesktopCallback != null)
+            {
+                _restoreToDesktopCallback(_model);
+            }
+        }
+
+        private void ReturnToSource_Click(object sender, RoutedEventArgs e)
+        {
+            if (IsShellItem() || string.IsNullOrEmpty(_model.Path))
+            {
+                return;
+            }
+
             try
             {
-                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                string path = _model.Path;
+                string original = _model.OriginalPath;
 
-                if (_model.ExternalReference)
+                // 我们代为创建的快捷方式：删掉这份快捷方式；原始文件/文件夹一律不动
+                if (!string.IsNullOrEmpty(original) &&
+                    path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(path))
                 {
-                    if (CreateDesktopShortcutForExternalReference())
+                    string target = ItemStorage.ReadShortcutTarget(path);
+                    if (string.Equals(
+                            target,
+                            original,
+                            StringComparison.OrdinalIgnoreCase))
                     {
-                        if (_removeCallback != null)
-                        {
-                            _removeCallback(_model);
-                        }
+                        File.Delete(path);
                     }
-                    return;
                 }
 
-                if (RegionControl.IsDesktopPath(_model.Path))
+                // 若隐藏属性是我们加的，恢复它
+                if (_model.HiddenByGhostDesk &&
+                    !string.IsNullOrEmpty(original) &&
+                    (File.Exists(original) || Directory.Exists(original)))
                 {
-                    if (_removeCallback != null)
-                    {
-                        _removeCallback(_model);
-                    }
-                    return;
-                }
-
-                string fileName = Path.GetFileName(_model.Path);
-                string destination = GetUniqueDestination(desktop, fileName);
-
-                if (string.Equals(_model.Path, destination, StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-
-                if (Directory.Exists(_model.Path))
-                {
-                    Microsoft.VisualBasic.FileIO.FileSystem.MoveDirectory(
-                        _model.Path,
-                        destination,
-                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                        Microsoft.VisualBasic.FileIO.UICancelOption.DoNothing);
-                }
-                else
-                {
-                    Microsoft.VisualBasic.FileIO.FileSystem.MoveFile(
-                        _model.Path,
-                        destination,
-                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                        Microsoft.VisualBasic.FileIO.UICancelOption.DoNothing);
-                }
-
-                _model.Path = destination;
-                _model.Name = DisplayNameForPath(destination);
-                RegionControl.SetDesktopItemVisibility(destination, true);
-                if (_removeCallback != null)
-                {
-                    _removeCallback(_model);
+                    StorageSafety.ClearHiddenAttribute(original);
                 }
             }
             catch (Exception ex)
             {
-                ShowError("放回桌面失败", ex);
+                ShowError("放回源路径失败", ex);
+                return;
+            }
+
+            if (_removeCallback != null)
+            {
+                _removeCallback(_model);
             }
         }
 
         private void DeleteToRecycleBin_Click(object sender, RoutedEventArgs e)
         {
-            if (IsShellItem() || !File.Exists(_model.Path) && !Directory.Exists(_model.Path))
+            if (IsShellItem() ||
+                (!File.Exists(_model.Path) && !Directory.Exists(_model.Path)))
             {
+                return;
+            }
+
+            // 安全护栏：桌面以外的原始文件/文件夹只移除引用，绝不删源文件。
+            // 只有桌面上的收纳项、以及我们代建的快捷方式才真正删除。
+            bool onDesktop = StorageSafety.IsOnUserDesktop(_model.Path) ||
+                StorageSafety.IsOnPublicDesktop(_model.Path);
+            bool createdByUs = !string.IsNullOrEmpty(_model.OriginalPath);
+            if (!onDesktop && !createdByUs)
+            {
+                if (_removeCallback != null)
+                {
+                    _removeCallback(_model);
+                }
+
                 return;
             }
 
@@ -3750,6 +4067,7 @@ namespace GhostDesk
                 _removeCallback,
                 _locateCallback,
                 _itemsChangedCallback,
+                _restoreToDesktopCallback,
                 _addToLaunchCallback,
                 _launchTargetsProvider,
                 _showExtensions);
@@ -3788,6 +4106,8 @@ namespace GhostDesk
 
             ReleaseMouseCapture();
             _oleDragRunning = true;
+            bool restoreHidden = false;
+            bool restoreSystem = false;
             DataObject data = new DataObject();
             RegionControl.ItemDragPayload payload = new RegionControl.ItemDragPayload
             {
@@ -3796,18 +4116,41 @@ namespace GhostDesk
                 Control = this
             };
             data.SetData(RegionControl.ItemDragFormat, payload);
-            if (!string.IsNullOrWhiteSpace(_model.Path) &&
+            if (ItemStorage.IsManagedPath(_model.Path) &&
                 (File.Exists(_model.Path) || Directory.Exists(_model.Path)))
             {
-                if (!_model.ExternalReference &&
-                    !RegionControl.IsDesktopPath(_model.Path))
+                try
                 {
-                    StringCollection files = new StringCollection();
-                    files.Add(_model.Path);
-                    data.SetFileDropList(files);
+                    FileAttributes attributes = File.GetAttributes(_model.Path);
+                    restoreHidden =
+                        (attributes & FileAttributes.Hidden) == FileAttributes.Hidden;
+                    restoreSystem =
+                        (attributes & FileAttributes.System) == FileAttributes.System;
                 }
+                catch
+                {
+                    restoreHidden = false;
+                    restoreSystem = false;
+                }
+
+                // 拖到桌面前先摘掉 HIDDEN/SYSTEM，否则外壳移动后会留下一个看不见的桌面文件
+                ItemStorage.ClearHiddenSystemAttributes(_model.Path);
+                StringCollection files = new StringCollection();
+                files.Add(_model.Path);
+                data.SetFileDropList(files);
             }
 
+            bool escapePressed = false;
+            QueryContinueDragEventHandler continueDrag = delegate(
+                object sender,
+                QueryContinueDragEventArgs e)
+            {
+                if (e.EscapePressed)
+                {
+                    escapePressed = true;
+                }
+            };
+            QueryContinueDrag += continueDrag;
             try
             {
                 if (InteractionStarted != null)
@@ -3826,20 +4169,18 @@ namespace GhostDesk
                 }
 
                 RegionControl dropOwner = payload.Source ?? FindAncestor<RegionControl>();
-                if (_model.ExternalReference &&
-                    (dropOwner == null || !dropOwner.ContainsScreenPoint(GetCursorScreenPoint())) &&
-                    RegionControl.IsCursorOverDesktop() &&
-                    CreateDesktopShortcutForExternalReference())
-                {
-                    if (_removeCallback != null)
-                    {
-                        _removeCallback(_model);
-                    }
-                    return;
-                }
-
-                if (effect != DragDropEffects.None &&
-                    (dropOwner == null || !dropOwner.ContainsScreenPoint(GetCursorScreenPoint())))
+                bool outside = dropOwner == null ||
+                    !dropOwner.ContainsScreenPoint(GetCursorScreenPoint());
+                if (RegionControl.ShouldRemoveItemAfterExternalDrop(
+                        _model,
+                        effect,
+                        escapePressed,
+                        payload.Dropped,
+                        outside,
+                        dropOwner != null
+                            ? dropOwner.IsCursorOverDesktopTarget()
+                            : RegionControl.IsCursorOverDesktop(),
+                        ItemStorage.WasExternalMoveCommitted(_model)))
                 {
                     if (_removeCallback != null)
                     {
@@ -3849,7 +4190,17 @@ namespace GhostDesk
             }
             finally
             {
+                QueryContinueDrag -= continueDrag;
                 _oleDragRunning = false;
+                if (restoreHidden &&
+                    (File.Exists(_model.Path) || Directory.Exists(_model.Path)))
+                {
+                    string reason;
+                    StorageSafety.SetHiddenAttribute(
+                        _model.Path,
+                        restoreSystem,
+                        out reason);
+                }
                 if (InteractionEnded != null)
                 {
                     InteractionEnded();
@@ -4011,11 +4362,6 @@ namespace GhostDesk
 
             string type = _model.Type ?? "";
             string path = _model.Path ?? "";
-            if (_model.ExternalReference)
-            {
-                return GetExternalReferenceDisplayName(type, path);
-            }
-
             if (string.Equals(type, "folder", StringComparison.OrdinalIgnoreCase))
             {
                 return Path.GetFileName(path.TrimEnd('\\'));
@@ -4037,50 +4383,6 @@ namespace GhostDesk
             }
 
             return Path.GetFileNameWithoutExtension(path);
-        }
-
-        private string GetExternalReferenceDisplayName(string type, string path)
-        {
-            string name = string.IsNullOrWhiteSpace(_model.Name)
-                ? Path.GetFileName(path)
-                : _model.Name.Trim();
-            if (string.Equals(type, "folder", StringComparison.OrdinalIgnoreCase))
-            {
-                return name.TrimEnd('\\');
-            }
-
-            if (string.Equals(type, "shortcut", StringComparison.OrdinalIgnoreCase))
-            {
-                if (string.IsNullOrWhiteSpace(name))
-                {
-                    return Path.GetFileNameWithoutExtension(path);
-                }
-
-                return _showExtensions ||
-                       !name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)
-                    ? name
-                    : name.Substring(0, name.Length - 4);
-            }
-
-            string sourceExtension = Path.GetExtension(path);
-            if (!_showExtensions)
-            {
-                if (!string.IsNullOrEmpty(sourceExtension) &&
-                    name.EndsWith(sourceExtension, StringComparison.OrdinalIgnoreCase))
-                {
-                    return name.Substring(0, name.Length - sourceExtension.Length);
-                }
-
-                return name;
-            }
-
-            if (!string.IsNullOrEmpty(sourceExtension) &&
-                string.IsNullOrEmpty(Path.GetExtension(name)))
-            {
-                return name + sourceExtension;
-            }
-
-            return name;
         }
 
         private string ResolveRenameFileName(string newName, string oldFileName)
@@ -4138,285 +4440,6 @@ namespace GhostDesk
             return Path.GetFileName(path);
         }
 
-        internal bool CreateDesktopShortcutForExternalReference()
-        {
-            if (IsShellItem() ||
-                (!File.Exists(_model.Path) && !Directory.Exists(_model.Path)))
-            {
-                return false;
-            }
-
-            try
-            {
-                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                string shortcutName = GetExternalShortcutName();
-                string destination = GetUniqueDestination(
-                    desktop,
-                    shortcutName + ".lnk");
-
-                if (string.Equals(
-                        Path.GetExtension(_model.Path),
-                        ".lnk",
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    File.Copy(_model.Path, destination, false);
-                }
-                else
-                {
-                    string sourceDirectory = Path.GetDirectoryName(_model.Path);
-                    string existingShortcut =
-                        FindExistingShortcutForTarget(_model.Path, sourceDirectory);
-                    if (!string.IsNullOrEmpty(existingShortcut))
-                    {
-                        File.Copy(existingShortcut, destination, false);
-                    }
-                    else
-                    {
-                        CreateWindowsShortcut(destination, _model.Path);
-                    }
-                }
-
-                RegionControl.SetDesktopItemVisibility(destination, true);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ShowError("创建桌面快捷方式失败", ex);
-                return false;
-            }
-        }
-
-        internal static string CreateManagedShortcutForExternalPath(string sourcePath)
-        {
-            if (string.IsNullOrWhiteSpace(sourcePath))
-            {
-                throw new ArgumentException("源路径为空。", "sourcePath");
-            }
-
-            string normalized = Path.GetFullPath(sourcePath);
-            if (IsShortcutPath(normalized))
-            {
-                return normalized;
-            }
-
-            if (!File.Exists(normalized) && !Directory.Exists(normalized))
-            {
-                throw new FileNotFoundException("源文件或文件夹不存在。", normalized);
-            }
-
-            string sourceDirectory = Path.GetDirectoryName(normalized.TrimEnd('\\'));
-            if (string.IsNullOrEmpty(sourceDirectory))
-            {
-                sourceDirectory = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "GhostDesk",
-                    "Shortcuts");
-            }
-
-            Directory.CreateDirectory(sourceDirectory);
-
-            string baseName = Directory.Exists(normalized)
-                ? new DirectoryInfo(normalized.TrimEnd('\\')).Name
-                : Path.GetFileNameWithoutExtension(normalized);
-            baseName = SanitizeShortcutFileName(baseName);
-
-            string candidate = Path.Combine(sourceDirectory, baseName + ".lnk");
-            string existingShortcut =
-                FindExistingShortcutForTarget(normalized, sourceDirectory, candidate);
-            if (File.Exists(candidate))
-            {
-                if (IsShortcutPointingToPath(candidate, normalized))
-                {
-                    if (!string.IsNullOrEmpty(existingShortcut) &&
-                        !PathsEqual(existingShortcut, candidate) &&
-                        ShouldRepairManagedShortcut(candidate, existingShortcut, sourceDirectory))
-                    {
-                        File.Copy(existingShortcut, candidate, true);
-                    }
-
-                    return candidate;
-                }
-
-                candidate = GetUniqueDestination(sourceDirectory, baseName + ".lnk");
-            }
-
-            if (!string.IsNullOrEmpty(existingShortcut))
-            {
-                File.Copy(existingShortcut, candidate, false);
-            }
-            else
-            {
-                CreateWindowsShortcut(candidate, normalized);
-            }
-
-            if (!IsShortcutPointingToPath(candidate, normalized))
-            {
-                throw new InvalidOperationException("快捷方式创建后校验失败。");
-            }
-
-            return candidate;
-        }
-
-        internal static string FindExistingShortcutForTarget(
-            string targetPath,
-            string sourceDirectory)
-        {
-            return FindExistingShortcutForTarget(targetPath, sourceDirectory, null);
-        }
-
-        private static string FindExistingShortcutForTarget(
-            string targetPath,
-            string sourceDirectory,
-            string excludedShortcutPath)
-        {
-            if (string.IsNullOrWhiteSpace(targetPath) ||
-                string.IsNullOrWhiteSpace(sourceDirectory) ||
-                !Directory.Exists(sourceDirectory))
-            {
-                return null;
-            }
-
-            string normalizedTarget;
-            try
-            {
-                normalizedTarget = Path.GetFullPath(targetPath);
-            }
-            catch
-            {
-                return null;
-            }
-
-            List<string> searchDirectories = new List<string>();
-            AddShortcutSearchDirectory(searchDirectories, sourceDirectory);
-            DirectoryInfo current = Directory.GetParent(sourceDirectory);
-            int depth = 0;
-            while (current != null && depth < 2)
-            {
-                AddShortcutSearchDirectory(searchDirectories, current.FullName);
-                current = current.Parent;
-                depth++;
-            }
-
-            foreach (string directory in searchDirectories)
-            {
-                string[] shortcuts;
-                try
-                {
-                    shortcuts = Directory.GetFiles(
-                        directory,
-                        "*.lnk",
-                        SearchOption.TopDirectoryOnly);
-                }
-                catch
-                {
-                    continue;
-                }
-
-                Array.Sort(shortcuts, StringComparer.OrdinalIgnoreCase);
-                foreach (string shortcut in shortcuts)
-                {
-                    if (!string.IsNullOrEmpty(excludedShortcutPath) &&
-                        PathsEqual(shortcut, excludedShortcutPath))
-                    {
-                        continue;
-                    }
-
-                    if (IsShortcutPointingToPath(shortcut, normalizedTarget))
-                    {
-                        return shortcut;
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        private static void AddShortcutSearchDirectory(
-            List<string> directories,
-            string directory)
-        {
-            if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
-            {
-                return;
-            }
-
-            string normalized;
-            try
-            {
-                normalized = Path.GetFullPath(directory).TrimEnd('\\');
-            }
-            catch
-            {
-                return;
-            }
-
-            foreach (string existing in directories)
-            {
-                if (string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-            }
-
-            directories.Add(normalized);
-        }
-
-        private static bool ShouldRepairManagedShortcut(
-            string candidate,
-            string preferredShortcut,
-            string sourceDirectory)
-        {
-            string candidateWorkingDirectory =
-                ReadWindowsShortcutProperty(candidate, "WorkingDirectory") as string;
-            string preferredWorkingDirectory =
-                ReadWindowsShortcutProperty(preferredShortcut, "WorkingDirectory") as string;
-
-            if (string.IsNullOrWhiteSpace(preferredWorkingDirectory) ||
-                PathsEqual(candidateWorkingDirectory, preferredWorkingDirectory))
-            {
-                return false;
-            }
-
-            return string.IsNullOrWhiteSpace(candidateWorkingDirectory) ||
-                PathsEqual(candidateWorkingDirectory, sourceDirectory);
-        }
-
-        private static bool PathsEqual(string first, string second)
-        {
-            if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second))
-            {
-                return false;
-            }
-
-            try
-            {
-                return string.Equals(
-                    Path.GetFullPath(first).TrimEnd('\\'),
-                    Path.GetFullPath(second).TrimEnd('\\'),
-                    StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static string SanitizeShortcutFileName(string value)
-        {
-            char[] invalid = Path.GetInvalidFileNameChars();
-            StringBuilder sanitized = new StringBuilder(value == null ? 0 : value.Length);
-            if (!string.IsNullOrEmpty(value))
-            {
-                foreach (char character in value)
-                {
-                    sanitized.Append(Array.IndexOf(invalid, character) >= 0 ? '_' : character);
-                }
-            }
-
-            string result = sanitized.ToString().Trim().TrimEnd('.');
-            return string.IsNullOrEmpty(result) ? "快捷方式" : result;
-        }
-
         internal static bool IsShortcutPath(string path)
         {
             return !string.IsNullOrEmpty(path) &&
@@ -4424,34 +4447,6 @@ namespace GhostDesk
                     Path.GetExtension(path),
                     ".lnk",
                     StringComparison.OrdinalIgnoreCase);
-        }
-
-        internal static bool IsShortcutPointingToPath(string shortcutPath, string targetPath)
-        {
-            if (!IsShortcutPath(shortcutPath) ||
-                !File.Exists(shortcutPath) ||
-                string.IsNullOrWhiteSpace(targetPath))
-            {
-                return false;
-            }
-
-            string shortcutTarget = ReadWindowsShortcutTarget(shortcutPath);
-            if (string.IsNullOrEmpty(shortcutTarget))
-            {
-                return false;
-            }
-
-            try
-            {
-                return string.Equals(
-                    Path.GetFullPath(shortcutTarget),
-                    Path.GetFullPath(targetPath),
-                    StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         internal static string ResolveShortcutTargetPath(string path)
@@ -4483,102 +4478,12 @@ namespace GhostDesk
             return target;
         }
 
-        private string GetExternalShortcutName()
-        {
-            string name = string.IsNullOrWhiteSpace(_model.Name)
-                ? Path.GetFileName(_model.Path)
-                : _model.Name.Trim();
-            string sourceExtension = Path.GetExtension(_model.Path);
-            if (!string.IsNullOrEmpty(sourceExtension) &&
-                name.EndsWith(sourceExtension, StringComparison.OrdinalIgnoreCase))
-            {
-                name = name.Substring(0, name.Length - sourceExtension.Length);
-            }
-
-            if (name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
-            {
-                name = name.Substring(0, name.Length - 4);
-            }
-
-            char[] invalid = Path.GetInvalidFileNameChars();
-            StringBuilder sanitized = new StringBuilder(name.Length);
-            foreach (char value in name)
-            {
-                sanitized.Append(Array.IndexOf(invalid, value) >= 0 ? '_' : value);
-            }
-
-            name = sanitized.ToString().Trim().TrimEnd('.');
-            return string.IsNullOrEmpty(name) ? "快捷方式" : name;
-        }
-
-        private static void CreateWindowsShortcut(
-            string shortcutPath,
-            string targetPath)
-        {
-            Type shellType = Type.GetTypeFromProgID("WScript.Shell");
-            if (shellType == null)
-            {
-                throw new InvalidOperationException("当前系统不支持创建快捷方式。");
-            }
-
-            object shell = null;
-            object shortcut = null;
-            try
-            {
-                shell = Activator.CreateInstance(shellType);
-                shortcut = shellType.InvokeMember(
-                    "CreateShortcut",
-                    BindingFlags.InvokeMethod,
-                    null,
-                    shell,
-                    new object[] { shortcutPath });
-                Type shortcutType = shortcut.GetType();
-                shortcutType.InvokeMember(
-                    "TargetPath",
-                    BindingFlags.SetProperty,
-                    null,
-                    shortcut,
-                    new object[] { targetPath });
-
-                string workingDirectory = Directory.Exists(targetPath)
-                    ? targetPath
-                    : Path.GetDirectoryName(targetPath);
-                if (!string.IsNullOrEmpty(workingDirectory))
-                {
-                    shortcutType.InvokeMember(
-                        "WorkingDirectory",
-                        BindingFlags.SetProperty,
-                        null,
-                        shortcut,
-                        new object[] { workingDirectory });
-                }
-
-                shortcutType.InvokeMember(
-                    "Save",
-                    BindingFlags.InvokeMethod,
-                    null,
-                    shortcut,
-                    null);
-            }
-            finally
-            {
-                if (shortcut != null && Marshal.IsComObject(shortcut))
-                {
-                    Marshal.ReleaseComObject(shortcut);
-                }
-                if (shell != null && Marshal.IsComObject(shell))
-                {
-                    Marshal.ReleaseComObject(shell);
-                }
-            }
-        }
-
         private static string ReadWindowsShortcutTarget(string shortcutPath)
         {
             return ReadWindowsShortcutProperty(shortcutPath, "TargetPath") as string;
         }
 
-        private static object ReadWindowsShortcutProperty(
+        internal static object ReadWindowsShortcutProperty(
             string shortcutPath,
             string propertyName)
         {
@@ -4622,28 +4527,6 @@ namespace GhostDesk
                     Marshal.ReleaseComObject(shell);
                 }
             }
-        }
-
-        private static string GetUniqueDestination(string directory, string fileName)
-        {
-            string candidate = Path.Combine(directory, fileName);
-            if (!File.Exists(candidate) && !Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            string baseName = Path.GetFileNameWithoutExtension(fileName);
-            string extension = Path.GetExtension(fileName);
-            for (int index = 2; index < 1000; index++)
-            {
-                candidate = Path.Combine(directory, baseName + " (" + index + ")" + extension);
-                if (!File.Exists(candidate) && !Directory.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-
-            return Path.Combine(directory, Guid.NewGuid().ToString("N") + extension);
         }
 
         private void ShowError(string title, Exception ex)

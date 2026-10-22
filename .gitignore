@@ -2,9 +2,12 @@ bin/
 dist/
 qa/
 .vs/
+.testdata/
 *.suo
 *.user
 *.log
 *.bak
 *.bak-*
 
+
+docs/

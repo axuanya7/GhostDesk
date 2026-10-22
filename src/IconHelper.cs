@@ -78,6 +78,35 @@ namespace GhostDesk
                     return shellItemIcon;
                 }
 
+                // ① 快捷方式：Shell 解析隐藏的 .lnk 常失败，改用它指向的目标取图标
+                if (extension == ".lnk")
+                {
+                    string target = ReadShortcutTarget(path);
+                    if (!string.IsNullOrEmpty(target))
+                    {
+                        BitmapSource targetIcon = ExtractByShellItem(
+                            target, 48, NativeMethods.SIIGBF_ICONONLY);
+                        if (targetIcon != null)
+                        {
+                            return targetIcon;
+                        }
+                    }
+                }
+
+                // ② 带 HIDDEN/SYSTEM 属性的文件 Shell 会拒绝出图标：临时摘掉再取一次
+                BitmapSource unhiddenIcon = ExtractByTemporarilyUnhiding(path, shellOptions);
+                if (unhiddenIcon != null)
+                {
+                    return unhiddenIcon;
+                }
+
+                // ③ 最后按扩展名关联图标兜底（不访问文件本身）
+                BitmapSource associatedIcon = ExtractByExtension(path);
+                if (associatedIcon != null)
+                {
+                    return associatedIcon;
+                }
+
                 NativeMethods.SHFILEINFO info = new NativeMethods.SHFILEINFO();
                 uint flags = NativeMethods.SHGFI_ICON | NativeMethods.SHGFI_LARGEICON;
                 if (!File.Exists(path) && !Directory.Exists(path))
@@ -104,16 +133,127 @@ namespace GhostDesk
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Diag("  extract EX " + path + " :: " + ex.GetType().Name + " " + ex.Message);
             }
+
+            Diag("  FALLBACK Application icon for: " + (path ?? "<null>") + " | type=" + (item.Type ?? "") + " | iconPath=" + (item.IconPath ?? ""));
 
             return FromIconHandle(SystemIcons.Application.Handle) ??
                    FromBitmap(SystemIcons.Application.ToBitmap());
         }
 
-        private static BitmapSource LoadCustomIcon(string path)
+        private static string ReadShortcutTarget(string shortcutPath)
         {
+            try
+            {
+                if (!File.Exists(shortcutPath))
+                {
+                    return null;
+                }
+
+                object target = DesktopItemControl.ReadWindowsShortcutProperty(
+                    shortcutPath, "TargetPath");
+                string text = target as string;
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return null;
+                }
+
+                text = Environment.ExpandEnvironmentVariables(text.Trim().Trim('"'));
+                if (File.Exists(text) || Directory.Exists(text))
+                {
+                    return text;
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static BitmapSource ExtractByTemporarilyUnhiding(string path, int options)
+        {
+            FileAttributes original;
+            bool restore = false;
+
+            try
+            {
+                original = File.GetAttributes(path);
+                if ((original & (FileAttributes.Hidden | FileAttributes.System)) == 0)
+                {
+                    return null;
+                }
+
+                File.SetAttributes(
+                    path,
+                    original & ~(FileAttributes.Hidden | FileAttributes.System));
+                restore = true;
+            }
+            catch
+            {
+                return null;
+            }
+
+            try
+            {
+                return ExtractByShellItem(path, 48, options);
+            }
+            finally
+            {
+                if (restore)
+                {
+                    try
+                    {
+                        File.SetAttributes(path, original);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private static BitmapSource ExtractByExtension(string path)
+        {
+            try
+            {
+                NativeMethods.SHFILEINFO info = new NativeMethods.SHFILEINFO();
+                uint flags = NativeMethods.SHGFI_ICON |
+                    NativeMethods.SHGFI_LARGEICON |
+                    NativeMethods.SHGFI_USEFILEATTRIBUTES;
+                const uint FileAttributeNormal = 0x80;
+
+                IntPtr hIcon = NativeMethods.SHGetFileInfo(
+                    path,
+                    FileAttributeNormal,
+                    ref info,
+                    (uint)Marshal.SizeOf(typeof(NativeMethods.SHFILEINFO)),
+                    flags);
+
+                if (hIcon != IntPtr.Zero)
+                {
+                    try
+                    {
+                        return FromIconHandle(hIcon);
+                    }
+                    finally
+                    {
+                        NativeMethods.DestroyIcon(hIcon);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static BitmapSource LoadCustomIcon(string path)        {
             if (string.IsNullOrEmpty(path) || !File.Exists(path))
             {
                 return null;
@@ -180,6 +320,7 @@ namespace GhostDesk
         {
             if (string.IsNullOrEmpty(path))
             {
+                Diag("  shell-item: empty path");
                 return null;
             }
 
@@ -199,6 +340,7 @@ namespace GhostDesk
                 {
                     if (hBitmap == IntPtr.Zero)
                     {
+                        Diag("  shell-item: null bitmap " + path);
                         return null;
                     }
 
@@ -219,9 +361,32 @@ namespace GhostDesk
                     NativeMethods.DeleteObject(hBitmap);
                 }
             }
+            catch (Exception ex)
+            {
+                Diag("  shell-item EX " + path + " :: " + ex.GetType().Name + " " + ex.Message);
+                return null;
+            }
+        }
+
+        private static readonly object DiagLock = new object();
+
+        private static void Diag(string message)
+        {
+            try
+            {
+                string path = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "icon-diag.log");
+                lock (DiagLock)
+                {
+                    File.AppendAllText(
+                        path,
+                        DateTime.Now.ToString("HH:mm:ss.fff") + " " + message + "\r\n",
+                        new System.Text.UTF8Encoding(false));
+                }
+            }
             catch
             {
-                return null;
             }
         }
 

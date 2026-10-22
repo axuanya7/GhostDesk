@@ -136,6 +136,13 @@ namespace GhostDesk
             string lpNewFileName,
             int dwFlags);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetVolumePathName(
+            string fileName,
+            StringBuilder volumePathName,
+            int bufferLength);
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern uint RegisterWindowMessage(string lpString);
 
