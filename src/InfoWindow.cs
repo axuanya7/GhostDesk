@@ -15,12 +15,12 @@ namespace GhostDesk
         {
             Title = title;
             Width = 560;
-            Height = 560;
+            MaxHeight = 640;
+            SizeToContent = SizeToContent.Height;
             MinWidth = 420;
-            MinHeight = 320;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             WindowStyle = WindowStyle.SingleBorderWindow;
-            ResizeMode = ResizeMode.CanResizeWithGrip;
+            ResizeMode = ResizeMode.NoResize;
             Background = GlassTheme.CreateBrush(255, 18, 22, 32);
             FontFamily = new FontFamily("Microsoft YaHei UI");
             Foreground = GlassTheme.TextPrimaryBrush;
@@ -48,7 +48,7 @@ namespace GhostDesk
             }
 
             ScrollViewer scroll = new ScrollViewer();
-            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
             scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
             scroll.Margin = new Thickness(0, 14, 0, 12);
 

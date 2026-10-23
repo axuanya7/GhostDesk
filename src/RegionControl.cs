@@ -83,7 +83,7 @@ namespace GhostDesk
         private Action<RegionConfig> _materialEditor;
 
         /// <summary>是否放出「外观材质」入口（材质功能验收后再置为 true）。</summary>
-        private static readonly bool MaterialUiEnabled = false;
+        private static readonly bool MaterialUiEnabled = true;
 
         private string _collapseHoverTrigger;
         private TextBox _renameBox;

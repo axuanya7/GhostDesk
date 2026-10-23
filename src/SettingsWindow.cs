@@ -83,7 +83,7 @@ namespace GhostDesk
         private bool _matSyncBusy;
 
         /// <summary>是否放出「分区材质」区块（材质功能验收后再置为 true）。</summary>
-        private static readonly bool MaterialUiEnabled = false;
+        private static readonly bool MaterialUiEnabled = true;
         private CheckBox _showExtensionsCheck;
         private Slider _backupIntervalSlider;
         private TextBlock _backupIntervalValue;
@@ -681,15 +681,6 @@ namespace GhostDesk
 
             dockPanel.Children.Add(dockGrid);
 
-            TextBlock dockHint = GlassTheme.CreateText(
-                "每个分区的朝向在分区右键「贴边方向」里单独设置（自动判断 / 固定四边 / 不贴边），"
-                    + "灵敏度只影响「自动判断」。滑块、输入框、鼠标滚轮三者联动。",
-                12,
-                true);
-            dockHint.TextWrapping = TextWrapping.Wrap;
-            dockHint.Margin = new Thickness(0, 4, 0, 0);
-            dockPanel.Children.Add(dockHint);
-
             page.Children.Add(dockPanel);
 
             StackPanel materialPanel = new StackPanel();
@@ -719,45 +710,29 @@ namespace GhostDesk
             int matOpacity = _config.MaterialOpacity ?? AppConfig.DefaultMaterialOpacity;
             _matOpacityBox = CreateNumberBox(matOpacity, 0, 100, 4, Material_Changed);
             _matOpacitySlider = CreateMaterialSlider(matOpacity, _matOpacityBox);
-            AddDockField(materialGrid, 0, 0, "背景不透明度", _matOpacitySlider, _matOpacityBox);
+            AddDockField(materialGrid, 0, 0, "背景不透明度", _matOpacitySlider, _matOpacityBox, "%");
 
             int matTint = _config.MaterialTint ?? AppConfig.DefaultMaterialTint;
             _matTintBox = CreateNumberBox(matTint, 0, 100, 4, Material_Changed);
             _matTintSlider = CreateMaterialSlider(matTint, _matTintBox);
-            AddDockField(materialGrid, 0, 2, "底色深浅", _matTintSlider, _matTintBox);
+            AddDockField(materialGrid, 0, 2, "底色深浅", _matTintSlider, _matTintBox, "%");
 
             int matBorder = _config.MaterialBorder ?? AppConfig.DefaultMaterialBorder;
             _matBorderBox = CreateNumberBox(matBorder, 0, 100, 4, Material_Changed);
             _matBorderSlider = CreateMaterialSlider(matBorder, _matBorderBox);
-            AddDockField(materialGrid, 1, 0, "描边强度", _matBorderSlider, _matBorderBox);
+            AddDockField(materialGrid, 1, 0, "描边强度", _matBorderSlider, _matBorderBox, "%");
 
             int matShadow = _config.MaterialShadow ?? AppConfig.DefaultMaterialShadow;
             _matShadowBox = CreateNumberBox(matShadow, 0, 100, 4, Material_Changed);
             _matShadowSlider = CreateMaterialSlider(matShadow, _matShadowBox);
-            AddDockField(materialGrid, 1, 2, "阴影强度", _matShadowSlider, _matShadowBox);
+            AddDockField(materialGrid, 1, 2, "阴影强度", _matShadowSlider, _matShadowBox, "%");
 
             materialPanel.Children.Add(materialGrid);
-
-            TextBlock materialHint = GlassTheme.CreateText(
-                "想单独调某个分区：右键该分区 →「外观材质...」。这里的数值是所有分区的默认值。",
-                12,
-                true);
-            materialHint.TextWrapping = TextWrapping.Wrap;
-            materialHint.Margin = new Thickness(0, 6, 0, 0);
-            materialPanel.Children.Add(materialHint);
 
             if (MaterialUiEnabled)
             {
                 page.Children.Add(materialPanel);
             }
-
-            TextBlock hint = GlassTheme.CreateText(
-                "拖到屏幕边缘始终会贴边。开启分区成组吸附后，相邻分区会按松开位置排序，并可成组拖动。扩展名设置会统一应用到所有分区。",
-                12,
-                true);
-            hint.TextWrapping = TextWrapping.Wrap;
-            hint.Margin = new Thickness(0, 0, 0, 12);
-            page.Children.Add(hint);
 
             _regionList = new StackPanel();
             page.Children.Add(_regionList);
@@ -2758,6 +2733,23 @@ namespace GhostDesk
             }
         }
 
+        private static bool TryParseNumberBox(TextBox box, int min, int max, out int value)
+        {
+            value = min;
+            if (box == null)
+            {
+                return false;
+            }
+
+            int parsed;
+            if (!int.TryParse((box.Text ?? "").Trim(), out parsed))
+            {
+                return false;
+            }
+
+            value = Math.Max(min, Math.Min(max, parsed));
+            return true;
+        }
         private static int ParseDockValue(TextBox box, int min, int max)
         {
             int value;
@@ -2837,14 +2829,9 @@ namespace GhostDesk
             box.FontSize = 13;
             box.Text = ((int)Math.Round(value)).ToString();
             box.TextAlignment = TextAlignment.Right;
-            box.Padding = new Thickness(6, 4, 6, 4);
             box.VerticalAlignment = VerticalAlignment.Center;
             box.HorizontalAlignment = HorizontalAlignment.Left;
-            box.Background = GlassTheme.CreateBrush(90, 255, 255, 255);
-            box.Foreground = GlassTheme.CreateBrush(240, 255, 255, 255);
-            box.CaretBrush = GlassTheme.CreateBrush(240, 255, 255, 255);
-            box.BorderBrush = GlassTheme.CreateBrush(70, 255, 255, 255);
-            box.BorderThickness = new Thickness(1);
+            ApplyNumberBoxStyle(box);
             box.Tag = new int[] { min, max, step };
 
             box.PreviewMouseWheel += delegate(object sender, MouseWheelEventArgs e)
@@ -2899,13 +2886,72 @@ namespace GhostDesk
         }
 
         /// <summary>「标签 + 短滑块 + 输入框 + 单位」放成紧凑的一格。</summary>
+        /// <summary>数值输入框：深色圆角、细描边，聚焦时描边变成强调色。</summary>
+        private static void ApplyNumberBoxStyle(TextBox box)
+        {
+            box.Background = Brushes.Transparent;
+            box.BorderThickness = new Thickness(0);
+            box.Foreground = GlassTheme.TextPrimaryBrush;
+            box.CaretBrush = GlassTheme.CreateBrush(240, 140, 214, 255);
+            box.SelectionBrush = GlassTheme.CreateBrush(90, 140, 214, 255);
+            box.Padding = new Thickness(0);
+            box.Height = 28;
+            box.FontWeight = FontWeights.SemiBold;
+            box.VerticalContentAlignment = VerticalAlignment.Center;
+            box.FocusVisualStyle = null;
+
+            ControlTemplate template = new ControlTemplate(typeof(TextBox));
+
+            FrameworkElementFactory border = new FrameworkElementFactory(typeof(Border));
+            border.Name = "BoxBorder";
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+            border.SetValue(Border.BackgroundProperty, GlassTheme.CreateBrush(14, 255, 255, 255));
+            border.SetValue(Border.BorderBrushProperty, GlassTheme.CreateBrush(34, 255, 255, 255));
+            border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+
+            FrameworkElementFactory host = new FrameworkElementFactory(typeof(ScrollViewer));
+            host.Name = "PART_ContentHost";
+            host.SetValue(FrameworkElement.MarginProperty, new Thickness(8, 0, 8, 0));
+            host.SetValue(ScrollViewer.VerticalAlignmentProperty, VerticalAlignment.Center);
+            host.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Hidden);
+            host.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Hidden);
+            border.AppendChild(host);
+
+            template.VisualTree = border;
+
+            Trigger hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new Setter(
+                Border.BorderBrushProperty,
+                GlassTheme.CreateBrush(80, 140, 214, 255),
+                "BoxBorder"));
+            template.Triggers.Add(hover);
+
+            Trigger focused = new Trigger
+            {
+                Property = UIElement.IsKeyboardFocusWithinProperty,
+                Value = true
+            };
+            focused.Setters.Add(new Setter(
+                Border.BorderBrushProperty,
+                GlassTheme.CreateBrush(180, 140, 214, 255),
+                "BoxBorder"));
+            focused.Setters.Add(new Setter(
+                Border.BackgroundProperty,
+                GlassTheme.CreateBrush(26, 140, 214, 255),
+                "BoxBorder"));
+            template.Triggers.Add(focused);
+
+            box.Template = template;
+        }
+
         private void AddDockField(
             Grid grid,
             int row,
             int column,
             string label,
             Slider slider,
-            TextBox box)
+            TextBox box,
+            string unit = "px")
         {
             StackPanel cell = new StackPanel();
             cell.Margin = new Thickness(0, 2, 0, 6);
@@ -2926,7 +2972,7 @@ namespace GhostDesk
 
             line.Children.Add(box);
 
-            TextBlock unitText = GlassTheme.CreateText("px", 12, true);
+            TextBlock unitText = GlassTheme.CreateText(unit, 12, true);
             unitText.VerticalAlignment = VerticalAlignment.Center;
             unitText.Margin = new Thickness(6, 0, 0, 0);
             line.Children.Add(unitText);
@@ -3061,10 +3107,22 @@ namespace GhostDesk
                 return;
             }
 
-            _config.MaterialOpacity = ParseDockValue(_matOpacityBox, 0, 100);
-            _config.MaterialTint = ParseDockValue(_matTintBox, 0, 100);
-            _config.MaterialBorder = ParseDockValue(_matBorderBox, 0, 100);
-            _config.MaterialShadow = ParseDockValue(_matShadowBox, 0, 100);
+            int opacity;
+            int tint;
+            int border;
+            int shadow;
+            if (!TryParseNumberBox(_matOpacityBox, 0, 100, out opacity) ||
+                !TryParseNumberBox(_matTintBox, 0, 100, out tint) ||
+                !TryParseNumberBox(_matBorderBox, 0, 100, out border) ||
+                !TryParseNumberBox(_matShadowBox, 0, 100, out shadow))
+            {
+                return;
+            }
+
+            _config.MaterialOpacity = opacity;
+            _config.MaterialTint = tint;
+            _config.MaterialBorder = border;
+            _config.MaterialShadow = shadow;
             ConfigStore.Save(_config);
             if (_desktop != null)
             {
@@ -3211,17 +3269,14 @@ namespace GhostDesk
         private void ShowNotes()
         {
             List<string> sections = new List<string>();
-            sections.Add("• 桌面上的文件 / 文件夹 / 快捷方式：拖进分区后只给原文件加「隐藏」属性，桌面图标消失，文件本身留在原处，不会移动。");
-            sections.Add("• 桌面以外的路径：GhostDesk 会先在这个文件所在的目录里建一个同名 .lnk 快捷方式，分区引用的是这份快捷方式，所以源文件的位置、名字都不会被改动。");
-            sections.Add("• 右键「删除（回收站）」：GhostDesk 代建的 .lnk 只会删掉这份快捷方式；直接引用的项目只移除分区记录，绝不会删除原始文件。");
-            sections.Add("• 「放回桌面 / 放回源路径」：只移除分区记录并恢复显示，文件位置和内容都不变。");
-            sections.Add("• 重命名：只改分区里显示的入口名（以及代建快捷方式的名字），不会修改源文件。");
-            sections.Add("• 贴边与朝向：右键分区 →「贴边方向」。固定在上/下/左/右只改变标题栏朝向，不会挪动分区；灵敏度与四周安全边距在「分区管理」页调整。");
-            sections.Add("• 配置与备份：配置保存在 %APPDATA%\\GhostDesk，可在「高级设置」里手动备份或恢复。");
-
+            sections.Add("• 桌面图标：只加隐藏属性，文件不动。");
+            sections.Add("• 桌面以外的路径：在原目录生成同名 .lnk，源文件不变。");
+            sections.Add("• 删除（回收站）：只删代建的快捷方式或移除记录，不删原始文件。");
+            sections.Add("• 放回桌面 / 放回源路径：只移除记录，文件位置不变。");
+            sections.Add("• 重命名：只改显示名。");
             InfoWindow window = new InfoWindow(
                 "分区收纳说明",
-                "下面几条说明可以帮你确认哪些操作不会动到原始文件。",
+                "彩蛋：双击已固定应用区的 GhostDesk 图标能直接显示分区。",
                 sections);
             window.Owner = this;
             window.ShowDialog();
