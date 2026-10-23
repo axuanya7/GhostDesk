@@ -25,8 +25,8 @@ GhostDesk 是一款面向 Windows 11 的桌面分区收纳工具。你可以把�
 最新版本：
 
 - [GitHub Releases](https://github.com/axuanya7/GhostDesk/releases/latest)
-- [GhostDesk-Setup-1.3.0.exe](https://github.com/axuanya7/GhostDesk/releases/download/v1.3.0/GhostDesk-Setup-1.3.0.exe)
-- [GhostDesk-v1.3.0-win-x64.zip](https://github.com/axuanya7/GhostDesk/releases/download/v1.3.0/GhostDesk-v1.3.0-win-x64.zip)
+- [GhostDesk-Setup-1.3.1.exe](https://github.com/axuanya7/GhostDesk/releases/download/v1.3.1/GhostDesk-Setup-1.3.1.exe)
+- [GhostDesk-v1.3.1-win-x64.zip](https://github.com/axuanya7/GhostDesk/releases/download/v1.3.1/GhostDesk-v1.3.1-win-x64.zip)
 
 推荐使用安装版，更新时可在软件内直接下载并替换。便携版无需安装，解压后运行 `GhostDesk.exe` 即可。
 

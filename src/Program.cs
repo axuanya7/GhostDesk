@@ -703,7 +703,7 @@ namespace GhostDesk
                 }
                 else
                 {
-                    Process.Start(CreateLaunchStartInfo(target));
+                    StartProcess(CreateLaunchStartInfo(target));
                 }
 
                 return true;
@@ -800,7 +800,7 @@ namespace GhostDesk
                 }
                 else
                 {
-                    Process.Start(CreateLaunchStartInfo(item.Path));
+                    StartProcess(CreateLaunchStartInfo(item.Path));
                 }
                 return true;
             }
@@ -819,7 +819,10 @@ namespace GhostDesk
                     CreateShortcutStartInfo(path);
                 if (shortcutStartInfo != null)
                 {
-                    return shortcutStartInfo;
+                    // 快捷方式本身勾了「以管理员身份运行」时，只有交给 shell 才会提权启动
+                    return ShortcutRequiresElevation(path)
+                        ? CreateElevatedStartInfo(shortcutStartInfo)
+                        : shortcutStartInfo;
                 }
             }
 
@@ -836,6 +839,107 @@ namespace GhostDesk
             }
 
             return startInfo;
+        }
+
+        /// <summary>CreateProcess 遇到清单里要求提权的目标程序时返回的错误码。</summary>
+        private const int ErrorElevationRequired = 740;
+
+        /// <summary>用户在 UAC 提示里点「否」时返回的错误码。</summary>
+        internal const int ErrorCancelledByUser = 1223;
+
+        /// <summary>
+        /// 启动进程。目标程序声明了 requireAdministrator 时，经过 shell 启动会自动弹 UAC，
+        /// 而 UseShellExecute=false 的 CreateProcess 只会以 740（请求的操作需要提升）失败，
+        /// 所以这里捕获该错误后改用 shell 的 runas 动词重试，其余错误照常抛出。
+        /// </summary>
+        internal static void StartProcess(ProcessStartInfo startInfo)
+        {
+            if (startInfo == null)
+            {
+                throw new ArgumentNullException("startInfo");
+            }
+
+            try
+            {
+                Process.Start(startInfo);
+                return;
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                if (ex.NativeErrorCode != ErrorElevationRequired)
+                {
+                    throw;
+                }
+            }
+
+            Process.Start(CreateElevatedStartInfo(startInfo));
+        }
+
+        /// <summary>判断启动失败是否只是用户在 UAC 提示里点了取消。</summary>
+        internal static bool IsElevationCancelled(Exception exception)
+        {
+            System.ComponentModel.Win32Exception win32 =
+                exception as System.ComponentModel.Win32Exception;
+            return win32 != null &&
+                win32.NativeErrorCode == ErrorCancelledByUser;
+        }
+
+        /// <summary>把普通启动参数改写成「以管理员身份运行」的等价参数。</summary>
+        internal static ProcessStartInfo CreateElevatedStartInfo(
+            ProcessStartInfo startInfo)
+        {
+            if (startInfo == null)
+            {
+                throw new ArgumentNullException("startInfo");
+            }
+
+            ProcessStartInfo elevated =
+                new ProcessStartInfo(startInfo.FileName);
+            elevated.Arguments = startInfo.Arguments ?? "";
+            elevated.UseShellExecute = true;
+            elevated.Verb = "runas";
+            if (!string.IsNullOrEmpty(startInfo.WorkingDirectory))
+            {
+                elevated.WorkingDirectory = startInfo.WorkingDirectory;
+            }
+
+            return elevated;
+        }
+
+        /// <summary>SHLLINK 的 LinkFlags 中「以管理员身份运行」对应的位。</summary>
+        private const uint ShortcutRunAsUserFlag = 0x00002000;
+
+        /// <summary>读取快捷方式是否勾选了「以管理员身份运行」（壳里双击同样会弹 UAC）。</summary>
+        private static bool ShortcutRequiresElevation(string shortcutPath)
+        {
+            try
+            {
+                byte[] header = new byte[0x18];
+                using (FileStream stream = new FileStream(
+                    shortcutPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite))
+                {
+                    if (stream.Read(header, 0, header.Length) != header.Length)
+                    {
+                        return false;
+                    }
+                }
+
+                // 0x00 是头长度 MAGIC 0x4C，0x14 起是 LinkFlags
+                if (BitConverter.ToInt32(header, 0) != 0x4C)
+                {
+                    return false;
+                }
+
+                uint flags = BitConverter.ToUInt32(header, 0x14);
+                return (flags & ShortcutRunAsUserFlag) != 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static ProcessStartInfo CreateShortcutStartInfo(

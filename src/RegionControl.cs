@@ -3602,11 +3602,15 @@ namespace GhostDesk
             try
             {
                 ProcessStartInfo startInfo = AppController.CreateLaunchStartInfo(_model.Path);
-                startInfo.Verb = "runas";
-                Process.Start(startInfo);
+                Process.Start(AppController.CreateElevatedStartInfo(startInfo));
             }
             catch (Exception ex)
             {
+                if (AppController.IsElevationCancelled(ex))
+                {
+                    return;
+                }
+
                 ShowError("无法以管理员身份运行", ex);
             }
         }

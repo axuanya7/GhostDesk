@@ -2277,10 +2277,15 @@ namespace GhostDesk
                     return;
                 }
 
-                Process.Start(AppController.CreateLaunchStartInfo(item.Path));
+                AppController.StartProcess(AppController.CreateLaunchStartInfo(item.Path));
             }
             catch (Exception ex)
             {
+                if (AppController.IsElevationCancelled(ex))
+                {
+                    return;
+                }
+
                 MessageBox.Show("无法打开：\n" + item.Path + "\n\n" + ex.Message, "GhostDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
