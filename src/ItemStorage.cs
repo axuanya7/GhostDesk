@@ -1155,7 +1155,7 @@ namespace GhostDesk
             return normalized;
         }
 
-        private static string ResolveDesktopDirectory()
+        internal static string ResolveDesktopDirectory()
         {
             string overrideDirectory =
                 Environment.GetEnvironmentVariable("GHOSTDESK_TEST_DESKTOP_DIR");

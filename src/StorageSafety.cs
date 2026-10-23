@@ -306,7 +306,7 @@ namespace GhostDesk
         /// <summary>该路径是否位于用户桌面。</summary>
         internal static bool IsOnUserDesktop(string path)
         {
-            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            string desktop = ItemStorage.ResolveDesktopDirectory();
             if (string.IsNullOrEmpty(desktop) || string.IsNullOrEmpty(path))
             {
                 return false;
