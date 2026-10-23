@@ -35,6 +35,8 @@ namespace GhostDesk
 
         public static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
         public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
 
         public const uint SHGFI_ICON = 0x000000100;
         public const uint SHGFI_LARGEICON = 0x000000000;
@@ -112,6 +114,13 @@ namespace GhostDesk
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref int value,
+            int size);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();

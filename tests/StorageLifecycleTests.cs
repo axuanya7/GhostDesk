@@ -171,6 +171,18 @@ namespace GhostDeskRegressionTests
             {
                 TestBulkStorage(sources);
             });
+            Run("dock edge picker prefers the drag direction", delegate
+            {
+                TestDockEdgePicker();
+            });
+            Run("dock anchor values are normalized", delegate
+            {
+                TestDockAnchorNormalization();
+            });
+            Run("app scanner skips uninstallers", delegate
+            {
+                TestAppScanner();
+            });
 
             Console.WriteLine();
             Console.WriteLine(
@@ -1645,6 +1657,100 @@ namespace GhostDeskRegressionTests
             }
 
             Directory.Delete(folder, true);
+        }
+
+        private static void TestDockEdgePicker()
+        {
+            Type windowType = GhostDeskAssembly.GetType(
+                "GhostDesk.DesktopWindow",
+                true);
+            MethodInfo pick = windowType.GetMethod(
+                "PickDockEdge",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            AssertTrue(pick != null, "PickDockEdge is missing");
+
+            AssertEqual(
+                "bottom",
+                pick.Invoke(null, new object[] { 12.0, 12.0, 0.0, 0.0, 2.0, 4.0, -90.0 }),
+                "a downward drag in the corner should dock to the bottom edge");
+            AssertEqual(
+                "right",
+                pick.Invoke(null, new object[] { 12.0, 12.0, 0.0, 0.0, 2.0, 90.0, 4.0 }),
+                "a sideways drag in the corner should dock to the right edge");
+            AssertEqual(
+                "",
+                pick.Invoke(null, new object[] { 40.0, 40.0, 40.0, 40.0, 2.0, 0.0, 0.0 }),
+                "staying away from every edge should not dock");
+            AssertEqual(
+                "left",
+                pick.Invoke(null, new object[] { 1.0, 40.0, 40.0, 40.0, 2.0, 0.0, 0.0 }),
+                "a single edge inside the band should dock");
+        }
+
+        private static void TestDockAnchorNormalization()
+        {
+            Type storeType = GhostDeskAssembly.GetType(
+                "GhostDesk.ConfigStore",
+                true);
+            MethodInfo normalize = storeType.GetMethod(
+                "NormalizeDockAnchor",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            AssertTrue(normalize != null, "NormalizeDockAnchor is missing");
+
+            AssertEqual(
+                "auto",
+                normalize.Invoke(null, new object[] { null }),
+                "null anchor");
+            AssertEqual(
+                "auto",
+                normalize.Invoke(null, new object[] { "bogus" }),
+                "unknown anchor");
+            AssertEqual(
+                "top",
+                normalize.Invoke(null, new object[] { " TOP " }),
+                "edge anchor");
+            // 「不贴边」已取消，旧值统一归一到 auto
+            AssertEqual(
+                "auto",
+                normalize.Invoke(null, new object[] { "Free" }),
+                "removed free anchor falls back to auto");
+        }
+
+        private static void TestAppScanner()
+        {
+            Type scannerType = GhostDeskAssembly.GetType(
+                "GhostDesk.AppScanner",
+                true);
+            MethodInfo isUninstaller = scannerType.GetMethod(
+                "IsUninstaller",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            AssertTrue(isUninstaller != null, "IsUninstaller is missing");
+            AssertTrue(
+                (bool)isUninstaller.Invoke(null, new object[] { "卸载 Foo" }),
+                "Chinese uninstaller name");
+            AssertTrue(
+                (bool)isUninstaller.Invoke(null, new object[] { "Uninstall Bar" }),
+                "English uninstaller name");
+            AssertFalse(
+                (bool)isUninstaller.Invoke(null, new object[] { "Visual Studio Code" }),
+                "normal app name");
+
+            MethodInfo scan = scannerType.GetMethod(
+                "Scan",
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            AssertTrue(scan != null, "Scan is missing");
+            System.Collections.IList shortcuts =
+                scan.Invoke(null, null) as System.Collections.IList;
+            AssertTrue(shortcuts != null, "Scan returned no list");
+            if (shortcuts == null)
+            {
+                return;
+            }
+            if (shortcuts.Count == 0)
+            {
+                throw new SkipException(
+                    "本机没有可扫描的开始菜单或桌面快捷方式");
+            }
         }
 
         private static TextBox FindInput(

@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -28,6 +29,10 @@ namespace GhostDesk
             new HashSet<RegionControl>();
         private bool _leftButtonWasDown;
         private bool _keyboardEditing;
+        private DispatcherTimer _layerRestoreTimer;
+        private DateTime _raiseHoldUntilUtc = DateTime.MinValue;
+        private DateTime _raiseSinceUtc = DateTime.MinValue;
+        private int _openContextMenuCount;
         private bool _paused;
         private bool _hoverEnabled = true;
         private uint _activateMsgId;
@@ -37,6 +42,9 @@ namespace GhostDesk
         private const double DockThreshold = 2.0;
         private const double ConnectedTolerance = 8.0;
         private const double ConnectedGap = 4.0;
+
+        /// <summary>同一侧分区之间的统一间距（成组吸附与贴边排布都用它）。</summary>
+        private const double RegionGap = 8.0;
         private const double FastTimerMilliseconds = 16.0;
         private const double IdleTimerMilliseconds = 200.0;
         private const double ProcessNameCacheTtlSeconds = 0.5;
@@ -93,6 +101,21 @@ namespace GhostDesk
             _timer.Start();
 
             SetAllRegionsHidden(true, 0.0);
+
+            // 只有在分区上按下左键时才把覆盖层抬到其它窗口之上
+            PreviewMouseDown += delegate(object sender, MouseButtonEventArgs e)
+            {
+                if (e.ChangedButton != MouseButton.Left)
+                {
+                    return;
+                }
+
+                RaiseOverlayAboveWindows();
+                _raiseHoldUntilUtc = DateTime.UtcNow.AddSeconds(1.2);
+                ScheduleOverlayBottom();
+            };
+
+            GlassTheme.ContextMenuVisibilityChanged = HandleContextMenuVisibility;
         }
 
         public void AddRegion(RegionConfig model)
@@ -115,6 +138,7 @@ namespace GhostDesk
                 _manifest);
             control.SetMoveCallbacks(BeginRegionMove, UpdateRegionMove, EndRegionMove);
             control.SetLayoutChangedCallback(RegionLayoutChanged);
+            control.SetDockAnchorChangedCallback(DockAnchorChanged);
             control.InteractionChanged += RegionInteractionChanged;
             _regions.Add(control);
             _root.Children.Add(control);
@@ -176,6 +200,23 @@ namespace GhostDesk
             foreach (RegionControl region in _regions)
             {
                 region.SetCollapseHoverTrigger(_config.CollapseHoverTrigger);
+            }
+        }
+
+        /// <summary>贴边灵敏度或安全边距变化后，按新设置重新摆放所有分区。</summary>
+        public void ApplyDockSettings()
+        {
+            ApplyDockLayout(RegionConfig.DockTop);
+            ApplyDockLayout(RegionConfig.DockBottom);
+            ApplyDockLayout(RegionConfig.DockLeft);
+            ApplyDockLayout(RegionConfig.DockRight);
+
+            foreach (RegionControl region in _regions)
+            {
+                if (region != null && !IsDocked(region))
+                {
+                    ClampRegionIntoWorkspace(region);
+                }
             }
         }
 
@@ -241,6 +282,7 @@ namespace GhostDesk
                 _primaryMovingRegion = null;
                 _movingGroup.Clear();
                 PersistConfigChange();
+                ScheduleOverlayBottom();
             }
         }
 
@@ -252,7 +294,7 @@ namespace GhostDesk
                 return;
             }
 
-            string targetEdge = FindDockEdgeForMovingGroup(region);
+            string targetEdge = ResolvePlacementEdge(region, true);
             HashSet<string> previousEdges = new HashSet<string>(StringComparer.Ordinal);
             foreach (RegionControl movingRegion in _movingGroup)
             {
@@ -615,6 +657,18 @@ namespace GhostDesk
             }
         }
 
+        /// <summary>分区贴边朝向被手动修改后，立即按新朝向贴边并落盘。</summary>
+        private void DockAnchorChanged(RegionControl region)
+        {
+            if (region == null)
+            {
+                return;
+            }
+
+            ApplyDockPlacement(region);
+            PersistConfigChange();
+        }
+
         private void ApplyDockPlacement(RegionControl region)
         {
             if (region == null)
@@ -624,7 +678,7 @@ namespace GhostDesk
 
             NormalizeRegionDock(region.Model);
             string previousEdge = region.Model.DockEdge;
-            string targetEdge = FindDockEdge(region);
+            string targetEdge = ResolvePlacementEdge(region, false);
             Point releasePosition = GetRegionPosition(region);
 
             if (!string.IsNullOrEmpty(targetEdge))
@@ -660,39 +714,113 @@ namespace GhostDesk
         private string FindDockEdge(RegionControl region)
         {
             Rect rect = GetRegionRect(region);
-            double availableWidth = GetWorkspaceWidth();
-            double availableHeight = GetWorkspaceHeight();
+            double band = GetDockBand();
+            Rect usable = GetUsableRect();
 
-            double leftDistance = Math.Max(0.0, rect.Left);
-            double topDistance = Math.Max(0.0, rect.Top);
-            double rightDistance = Math.Max(0.0, availableWidth - rect.Right);
-            double bottomDistance = Math.Max(0.0, availableHeight - rect.Bottom);
+            double leftDistance = Math.Max(0.0, rect.Left - usable.Left);
+            double topDistance = Math.Max(0.0, rect.Top - usable.Top);
+            double rightDistance = Math.Max(0.0, usable.Right - rect.Right);
+            double bottomDistance = Math.Max(0.0, usable.Bottom - rect.Bottom);
 
-            string edge = RegionConfig.DockNone;
-            double nearest = DockThreshold + 1.0;
+            Point current = GetRegionPosition(region);
+            double deltaX = current.X - _groupMoveOriginPrimaryPosition.X;
+            double deltaY = current.Y - _groupMoveOriginPrimaryPosition.Y;
 
-            if (leftDistance <= DockThreshold && leftDistance < nearest)
+            return PickDockEdge(
+                leftDistance,
+                topDistance,
+                rightDistance,
+                bottomDistance,
+                band,
+                deltaX,
+                deltaY);
+        }
+
+        /// <summary>
+        /// 从四个边的距离里挑一个：「进入边缘带」才贴边；距离并列时按拖动方向裁决，
+        /// 避免在左下/右下角被固定判定成竖排。
+        /// </summary>
+        private static string PickDockEdge(
+            double leftDistance,
+            double topDistance,
+            double rightDistance,
+            double bottomDistance,
+            double band,
+            double deltaX,
+            double deltaY)
+        {
+            double[] distances =
             {
-                edge = RegionConfig.DockLeft;
-                nearest = leftDistance;
-            }
-            if (topDistance <= DockThreshold && topDistance < nearest)
+                leftDistance,
+                topDistance,
+                rightDistance,
+                bottomDistance
+            };
+            string[] edges =
             {
-                edge = RegionConfig.DockTop;
-                nearest = topDistance;
-            }
-            if (rightDistance <= DockThreshold && rightDistance < nearest)
+                RegionConfig.DockLeft,
+                RegionConfig.DockTop,
+                RegionConfig.DockRight,
+                RegionConfig.DockBottom
+            };
+
+            double nearest = double.MaxValue;
+            for (int i = 0; i < distances.Length; i++)
             {
-                edge = RegionConfig.DockRight;
-                nearest = rightDistance;
-            }
-            if (bottomDistance <= DockThreshold && bottomDistance < nearest)
-            {
-                edge = RegionConfig.DockBottom;
-                nearest = bottomDistance;
+                if (distances[i] <= band && distances[i] < nearest)
+                {
+                    nearest = distances[i];
+                }
             }
 
-            return edge;
+            if (nearest == double.MaxValue)
+            {
+                return RegionConfig.DockNone;
+            }
+
+            bool preferHorizontal =
+                Math.Abs(deltaY) > Math.Abs(deltaX) + 4.0;
+            bool preferVertical =
+                Math.Abs(deltaX) > Math.Abs(deltaY) + 4.0;
+
+            string fallback = RegionConfig.DockNone;
+            for (int i = 0; i < distances.Length; i++)
+            {
+                if (distances[i] > nearest + 1.0)
+                {
+                    continue;
+                }
+
+                bool horizontalEdge = i == 1 || i == 3;
+                if (preferHorizontal && horizontalEdge)
+                {
+                    return edges[i];
+                }
+                if (preferVertical && !horizontalEdge)
+                {
+                    return edges[i];
+                }
+                if (string.IsNullOrEmpty(fallback))
+                {
+                    fallback = edges[i];
+                }
+            }
+
+            return fallback;
+        }
+
+        /// <summary>按分区朝向锁定、总开关和 Alt 修饰键决定本次贴边的目标边。</summary>
+        private string ResolvePlacementEdge(RegionControl region, bool movingGroup)
+        {
+            // 标题朝向不影响位置；按住 Alt 时才临时不贴边
+            if (IsAltPressed())
+            {
+                return RegionConfig.DockNone;
+            }
+
+            return movingGroup
+                ? FindDockEdgeForMovingGroup(region)
+                : FindDockEdge(region);
         }
 
         private string FindDockEdgeForMovingGroup(RegionControl region)
@@ -703,12 +831,12 @@ namespace GhostDesk
             }
 
             Rect rect = GetMovingGroupBounds();
-            double availableWidth = GetWorkspaceWidth();
-            double availableHeight = GetWorkspaceHeight();
-            double leftDistance = Math.Max(0.0, rect.Left);
-            double topDistance = Math.Max(0.0, rect.Top);
-            double rightDistance = Math.Max(0.0, availableWidth - rect.Right);
-            double bottomDistance = Math.Max(0.0, availableHeight - rect.Bottom);
+            Rect usable = GetUsableRect();
+            double band = GetDockBand();
+            double leftDistance = Math.Max(0.0, rect.Left - usable.Left);
+            double topDistance = Math.Max(0.0, rect.Top - usable.Top);
+            double rightDistance = Math.Max(0.0, usable.Right - rect.Right);
+            double bottomDistance = Math.Max(0.0, usable.Bottom - rect.Bottom);
 
             Point current = GetRegionPosition(region);
             double deltaX = current.X - _groupMoveOriginPrimaryPosition.X;
@@ -716,56 +844,37 @@ namespace GhostDesk
             bool row = IsMovingGroupAligned(true);
             if (!row && Math.Abs(deltaY) > Math.Abs(deltaX) + 4.0)
             {
-                if (topDistance <= DockThreshold &&
+                if (topDistance <= band &&
                     topDistance <= bottomDistance)
                 {
                     return RegionConfig.DockTop;
                 }
-                if (bottomDistance <= DockThreshold)
+                if (bottomDistance <= band)
                 {
                     return RegionConfig.DockBottom;
                 }
             }
             else if (Math.Abs(deltaX) > Math.Abs(deltaY) + 4.0)
             {
-                if (leftDistance <= DockThreshold &&
+                if (leftDistance <= band &&
                     leftDistance <= rightDistance)
                 {
                     return RegionConfig.DockLeft;
                 }
-                if (rightDistance <= DockThreshold)
+                if (rightDistance <= band)
                 {
                     return RegionConfig.DockRight;
                 }
             }
 
-            string edge = RegionConfig.DockNone;
-            double nearest = DockThreshold + 1.0;
-            if (leftDistance <= DockThreshold && leftDistance < nearest)
-            {
-                edge = RegionConfig.DockLeft;
-                nearest = leftDistance;
-            }
-            if (!row &&
-                topDistance <= DockThreshold &&
-                topDistance < nearest)
-            {
-                edge = RegionConfig.DockTop;
-                nearest = topDistance;
-            }
-            if (rightDistance <= DockThreshold && rightDistance < nearest)
-            {
-                edge = RegionConfig.DockRight;
-                nearest = rightDistance;
-            }
-            if (!row &&
-                bottomDistance <= DockThreshold &&
-                bottomDistance < nearest)
-            {
-                edge = RegionConfig.DockBottom;
-            }
-
-            return edge;
+            return PickDockEdge(
+                leftDistance,
+                topDistance,
+                rightDistance,
+                bottomDistance,
+                band,
+                deltaX,
+                deltaY);
         }
 
         private void AssignDockOrderAtPosition(RegionControl target, string edge)
@@ -867,62 +976,115 @@ namespace GhostDesk
                 return;
             }
 
-            double availableWidth = GetWorkspaceWidth();
-            double availableHeight = GetWorkspaceHeight();
+            Rect usable = GetUsableRect();
+            double availableWidth = usable.Width;
+            double availableHeight = usable.Height;
             bool horizontal =
                 string.Equals(edge, RegionConfig.DockTop, StringComparison.Ordinal) ||
                 string.Equals(edge, RegionConfig.DockBottom, StringComparison.Ordinal);
 
             double availableAlong = horizontal ? availableWidth : availableHeight;
-            foreach (RegionControl region in docked)
+
+            // 只做「避免重叠」：每个分区保留自己的位置，只有和正在拖动的分区（或已放置的）
+            // 靠得比 RegionGap 更近时才顺着推开，不会像成组吸附那样整排重排。
+            List<RegionControl> ordered = new List<RegionControl>(docked);
+            ordered.Sort(delegate(RegionControl first, RegionControl second)
+            {
+                if (anchor != null)
+                {
+                    if (ReferenceEquals(first, anchor))
+                    {
+                        return -1;
+                    }
+                    if (ReferenceEquals(second, anchor))
+                    {
+                        return 1;
+                    }
+                }
+
+                double firstAlong = horizontal
+                    ? GetRegionPosition(first).X - usable.Left
+                    : GetRegionPosition(first).Y - usable.Top;
+                double secondAlong = horizontal
+                    ? GetRegionPosition(second).X - usable.Left
+                    : GetRegionPosition(second).Y - usable.Top;
+                return firstAlong.CompareTo(secondAlong);
+            });
+
+            double gap = RegionGap;
+            List<RegionControl> placed = new List<RegionControl>();
+            Dictionary<RegionControl, double> starts =
+                new Dictionary<RegionControl, double>();
+            Dictionary<RegionControl, double> sizes =
+                new Dictionary<RegionControl, double>();
+
+            foreach (RegionControl region in ordered)
             {
                 double width;
                 double height;
                 GetRegionSize(region, out width, out height);
+                double size = horizontal ? width : height;
+                sizes[region] = size;
 
-                Point current = GetRegionPosition(region);
-                double along = horizontal ? current.X : current.Y;
-                if (anchor != null && ReferenceEquals(region, anchor))
+                double along = anchor != null && ReferenceEquals(region, anchor)
+                    ? anchorPosition
+                    : (horizontal
+                        ? GetRegionPosition(region).X - usable.Left
+                        : GetRegionPosition(region).Y - usable.Top);
+
+                along = Math.Max(
+                    0.0,
+                    Math.Min(Math.Max(0.0, availableAlong - size), along));
+
+                bool shifted = true;
+                int guard = 0;
+                while (shifted && guard++ < 64)
                 {
-                    along = anchorPosition;
+                    shifted = false;
+                    foreach (RegionControl other in placed)
+                    {
+                        double otherStart = starts[other];
+                        double otherSize = sizes[other];
+                        if (along < otherStart + otherSize + gap &&
+                            along + size > otherStart - gap)
+                        {
+                            along = otherStart + otherSize + gap;
+                            shifted = true;
+                        }
+                    }
                 }
 
-                double size = horizontal ? width : height;
-                along = Math.Min(
-                    Math.Max(0.0, availableAlong - size),
-                    Math.Max(0.0, along));
+                starts[region] = Math.Max(
+                    0.0,
+                    Math.Min(Math.Max(0.0, availableAlong - size), along));
+                placed.Add(region);
+            }
+
+            foreach (RegionControl region in placed)
+            {
+                double width;
+                double height;
+                GetRegionSize(region, out width, out height);
+                double along = starts[region];
 
                 double x;
                 double y;
-
                 if (horizontal)
                 {
-                    x = along;
-                    if (string.Equals(edge, RegionConfig.DockTop, StringComparison.Ordinal))
-                    {
-                        y = 0.0;
-                    }
-                    else
-                    {
-                        y = availableHeight - height;
-                    }
+                    x = usable.Left + along;
+                    y = string.Equals(edge, RegionConfig.DockTop, StringComparison.Ordinal)
+                        ? usable.Top
+                        : usable.Top + availableHeight - height;
                 }
                 else
                 {
-                    y = along;
-                    if (string.Equals(edge, RegionConfig.DockLeft, StringComparison.Ordinal))
-                    {
-                        x = 0.0;
-                    }
-                    else
-                    {
-                        x = availableWidth - width;
-                    }
+                    y = usable.Top + along;
+                    x = string.Equals(edge, RegionConfig.DockLeft, StringComparison.Ordinal)
+                        ? usable.Left
+                        : usable.Left + availableWidth - width;
                 }
 
-                region.ApplyPosition(
-                    Math.Max(0.0, x),
-                    Math.Max(0.0, y));
+                region.ApplyPosition(Math.Max(0.0, x), Math.Max(0.0, y));
             }
         }
 
@@ -977,10 +1139,11 @@ namespace GhostDesk
             double width;
             double height;
             GetRegionSize(region, out width, out height);
-            double maximumX = Math.Max(0.0, GetWorkspaceWidth() - width);
-            double maximumY = Math.Max(0.0, GetWorkspaceHeight() - height);
-            double x = Math.Min(maximumX, Math.Max(0.0, position.X));
-            double y = Math.Min(maximumY, Math.Max(0.0, position.Y));
+            Rect usable = GetUsableRect();
+            double maximumX = Math.Max(usable.Left, usable.Right - width);
+            double maximumY = Math.Max(usable.Top, usable.Bottom - height);
+            double x = Math.Min(maximumX, Math.Max(usable.Left, position.X));
+            double y = Math.Min(maximumY, Math.Max(usable.Top, position.Y));
             region.ApplyPosition(x, y);
         }
 
@@ -1009,6 +1172,64 @@ namespace GhostDesk
             }
             return SystemParameters.WorkArea.Height;
         }
+
+        /// <summary>
+        /// 可放置分区的区域：整屏减去任务栏等系统占位，再减去用户设置的安全边距。
+        /// 这样贴边后的分区不会盖住任务栏或顶部的桌面挂件（如 Rainmeter 时钟条）。
+        /// </summary>
+        private Rect GetUsableRect()
+        {
+            double screenWidth = GetWorkspaceWidth();
+            double screenHeight = GetWorkspaceHeight();
+            double left = 0.0;
+            double top = 0.0;
+            double right = 0.0;
+            double bottom = 0.0;
+
+            try
+            {
+                Rect work = SystemParameters.WorkArea;
+                double originX = Math.Max(0.0, SystemParameters.VirtualScreenLeft);
+                double originY = Math.Max(0.0, SystemParameters.VirtualScreenTop);
+                left = Math.Max(0.0, work.Left - originX);
+                top = Math.Max(0.0, work.Top - originY);
+                right = Math.Max(0.0, screenWidth - (work.Right - originX));
+                bottom = Math.Max(0.0, screenHeight - (work.Bottom - originY));
+            }
+            catch
+            {
+                left = 0.0;
+                top = 0.0;
+                right = 0.0;
+                bottom = 0.0;
+            }
+
+            if (_config != null)
+            {
+                left += _config.GetSafeInset(RegionConfig.DockLeft);
+                top += _config.GetSafeInset(RegionConfig.DockTop);
+                right += _config.GetSafeInset(RegionConfig.DockRight);
+                bottom += _config.GetSafeInset(RegionConfig.DockBottom);
+            }
+
+            double width = Math.Max(80.0, screenWidth - left - right);
+            double height = Math.Max(80.0, screenHeight - top - bottom);
+            return new Rect(left, top, width, height);
+        }
+
+        /// <summary>贴边判定使用的边缘带宽度（像素）。</summary>
+        private double GetDockBand()
+        {
+            return _config != null ? _config.GetEdgeDockBand() : DockThreshold;
+        }
+
+
+        /// <summary>拖动时按住 Alt 临时禁用贴边，方便精确摆放。</summary>
+        private static bool IsAltPressed()
+        {
+            return (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt;
+        }
+
 
         private static void NormalizeRegionDock(RegionConfig model)
         {
@@ -1150,135 +1371,70 @@ namespace GhostDesk
 
             foreach (RegionControl other in _regions)
             {
-                if (other == null || ReferenceEquals(other, primary) || _movingGroup.Contains(other))
+                if (other == null ||
+                    ReferenceEquals(other, primary) ||
+                    _movingGroup.Contains(other))
                 {
                     continue;
                 }
 
                 Rect rect = GetRegionRect(other);
-                bool horizontallyNear = Math.Abs(primaryTop - rect.Top) <= SnapThreshold;
-                bool verticallyNear = Math.Abs(primaryLeft - rect.Left) <= SnapThreshold;
+                bool sameRow = Math.Abs(primaryTop - rect.Top) <= SnapThreshold;
+                bool sameColumn = Math.Abs(primaryLeft - rect.Left) <= SnapThreshold;
 
-                if (horizontallyNear && Math.Abs(primaryRight - rect.Left) <= SnapThreshold)
+                // 只吸附到「并排」的位置，且始终留出统一间距 RegionGap：
+                // 贴近相邻分区时不会再压到对方身上（旧实现会把两块吸成重叠）。
+                if (sameRow &&
+                    Math.Abs(primaryRight + RegionGap - rect.Left) <= SnapThreshold)
                 {
-                    double x = rect.Left - primary.Model.Width;
-                    double y = rect.Top;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
+                    TrySnapCandidate(
+                        ref bestDistance,
+                        ref bestX,
+                        ref bestY,
+                        ref bestAttach,
+                        rect.Left - primary.Model.Width - RegionGap,
+                        rect.Top,
+                        desired,
+                        other);
                 }
-                if (horizontallyNear && Math.Abs(primaryLeft - rect.Right) <= SnapThreshold)
+                if (sameRow &&
+                    Math.Abs(primaryLeft - RegionGap - rect.Right) <= SnapThreshold)
                 {
-                    double x = rect.Right;
-                    double y = rect.Top;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
+                    TrySnapCandidate(
+                        ref bestDistance,
+                        ref bestX,
+                        ref bestY,
+                        ref bestAttach,
+                        rect.Right + RegionGap,
+                        rect.Top,
+                        desired,
+                        other);
                 }
-                if (horizontallyNear && Math.Abs(primaryLeft - rect.Left) <= SnapThreshold)
+                if (sameColumn &&
+                    Math.Abs(primaryBottom + RegionGap - rect.Top) <= SnapThreshold)
                 {
-                    double x = rect.Left;
-                    double y = rect.Top;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
+                    TrySnapCandidate(
+                        ref bestDistance,
+                        ref bestX,
+                        ref bestY,
+                        ref bestAttach,
+                        rect.Left,
+                        rect.Top - primary.Model.Height - RegionGap,
+                        desired,
+                        other);
                 }
-                if (horizontallyNear && Math.Abs(primaryRight - rect.Right) <= SnapThreshold)
+                if (sameColumn &&
+                    Math.Abs(primaryTop - RegionGap - rect.Bottom) <= SnapThreshold)
                 {
-                    double x = rect.Right - primary.Model.Width;
-                    double y = rect.Top;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
-                }
-
-                if (verticallyNear && Math.Abs(primaryBottom - rect.Top) <= SnapThreshold)
-                {
-                    double x = rect.Left;
-                    double y = rect.Top - primary.Model.Height;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
-                }
-                if (verticallyNear && Math.Abs(primaryTop - rect.Bottom) <= SnapThreshold)
-                {
-                    double x = rect.Left;
-                    double y = rect.Bottom;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
-                }
-                if (verticallyNear && Math.Abs(primaryTop - rect.Top) <= SnapThreshold)
-                {
-                    double x = rect.Left;
-                    double y = rect.Top;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
-                }
-                if (verticallyNear && Math.Abs(primaryBottom - rect.Bottom) <= SnapThreshold)
-                {
-                    double x = rect.Left;
-                    double y = rect.Bottom - primary.Model.Height;
-                    double dx = x - desired.X;
-                    double dy = y - desired.Y;
-                    double distance = (dx * dx) + (dy * dy);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestX = x;
-                        bestY = y;
-                        bestAttach = other;
-                    }
+                    TrySnapCandidate(
+                        ref bestDistance,
+                        ref bestX,
+                        ref bestY,
+                        ref bestAttach,
+                        rect.Left,
+                        rect.Bottom + RegionGap,
+                        desired,
+                        other);
                 }
             }
 
@@ -1286,6 +1442,29 @@ namespace GhostDesk
             attach = bestAttach;
         }
 
+        private static void TrySnapCandidate(
+            ref double bestDistance,
+            ref double bestX,
+            ref double bestY,
+            ref RegionControl bestAttach,
+            double x,
+            double y,
+            Point desired,
+            RegionControl other)
+        {
+            double dx = x - desired.X;
+            double dy = y - desired.Y;
+            double distance = (dx * dx) + (dy * dy);
+            if (distance >= bestDistance)
+            {
+                return;
+            }
+
+            bestDistance = distance;
+            bestX = x;
+            bestY = y;
+            bestAttach = other;
+        }
         private void MoveGroupBy(double deltaX, double deltaY)
         {
             foreach (RegionControl region in _movingGroup)
@@ -1304,10 +1483,11 @@ namespace GhostDesk
                 return;
             }
 
-            double left = 0.0;
-            double top = 0.0;
-            double right = GetWorkspaceWidth();
-            double bottom = GetWorkspaceHeight();
+            Rect usable = GetUsableRect();
+            double left = usable.Left;
+            double top = usable.Top;
+            double right = usable.Right;
+            double bottom = usable.Bottom;
 
             double minX = double.MaxValue;
             double minY = double.MaxValue;
@@ -1938,12 +2118,159 @@ namespace GhostDesk
             }));
         }
 
+        /// <summary>把覆盖层抬到普通窗口之上，让正在操作的分区不被遮住。</summary>
+        /// <summary>当前前台窗口是不是 GhostDesk 自己的其它窗口（设置页等）。</summary>
+        private bool IsOwnDialogForeground()
+        {
+            IntPtr foreground = NativeMethods.GetForegroundWindow();
+            if (foreground == IntPtr.Zero || foreground == _hwnd)
+            {
+                return false;
+            }
+
+            uint owner;
+            NativeMethods.GetWindowThreadProcessId(foreground, out owner);
+            return owner == (uint)Process.GetCurrentProcess().Id;
+        }
+
+        /// <summary>鼠标是不是停在某个分区上（决定要不要把覆盖层留在最上层）。</summary>
+        private bool IsCursorOverAnyRegion()
+        {
+            try
+            {
+                System.Drawing.Point cursor = System.Windows.Forms.Cursor.Position;
+                Point local = PointFromScreen(new Point(cursor.X, cursor.Y));
+                return FindRegionAt(local) != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>右键菜单打开时取消覆盖层置顶，否则菜单会被分区挡住。</summary>
+        private void SuspendOverlayTopmost()
+        {
+            if (_hwnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            NativeMethods.SetWindowPos(
+                _hwnd,
+                NativeMethods.HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+        }
+
+        private void HandleContextMenuVisibility(bool opened)
+        {
+            if (opened)
+            {
+                _openContextMenuCount++;
+                SuspendOverlayTopmost();
+                return;
+            }
+
+            if (_openContextMenuCount > 0)
+            {
+                _openContextMenuCount--;
+            }
+
+            if (_openContextMenuCount == 0)
+            {
+                ScheduleOverlayBottom();
+            }
+        }
+
+        private void RaiseOverlayAboveWindows()
+        {
+            if (_hwnd == IntPtr.Zero ||
+                IsOwnDialogForeground() ||
+                _openContextMenuCount > 0)
+            {
+                return;
+            }
+
+            if (_layerRestoreTimer != null)
+            {
+                _layerRestoreTimer.Stop();
+            }
+
+            _raiseSinceUtc = DateTime.UtcNow;
+
+            // 前台窗口属于别的进程时，HWND_TOP 会被前台锁定挡住，必须临时置顶才能压上去
+            NativeMethods.SetWindowPos(
+                _hwnd,
+                NativeMethods.HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+        }
+
+        /// <summary>
+        /// 交互（拖动、右键菜单、重命名）结束后把覆盖层放回普通窗口之下，
+        /// 避免分区长期浮在其他程序上面。
+        /// </summary>
+        private void ScheduleOverlayBottom()
+        {
+            if (_layerRestoreTimer == null)
+            {
+                _layerRestoreTimer = new DispatcherTimer();
+                _layerRestoreTimer.Interval = TimeSpan.FromMilliseconds(400);
+                _layerRestoreTimer.Tick += delegate
+                {
+                    _layerRestoreTimer.Stop();
+                    bool busy = _interactionRegions.Count > 0 ||
+                        _primaryMovingRegion != null ||
+                        _keyboardEditing;
+                    if (busy)
+                    {
+                        return;
+                    }
+
+                    bool raisedTooLong =
+                        (DateTime.UtcNow - _raiseSinceUtc).TotalSeconds > 6.0;
+                    if (!raisedTooLong &&
+                        (DateTime.UtcNow < _raiseHoldUntilUtc || IsCursorOverAnyRegion()))
+                    {
+                        // 刚点过、或鼠标还停在分区上：稍后再看
+                        _layerRestoreTimer.Start();
+                        return;
+                    }
+
+                    PositionBottom();
+                };
+            }
+
+            _layerRestoreTimer.Stop();
+            _layerRestoreTimer.Start();
+        }
+
         private void PositionBottom()
         {
             if (_hwnd == IntPtr.Zero)
             {
                 return;
             }
+
+            // 先取消置顶，再沉到最底层
+            NativeMethods.SetWindowPos(
+                _hwnd,
+                NativeMethods.HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
 
             NativeMethods.SetWindowPos(
                 _hwnd,
@@ -2112,6 +2439,12 @@ namespace GhostDesk
             {
                 region.SetHidden(hidden, fadeSeconds);
             }
+
+            // 全部收起来后把覆盖层落回桌面层，避免透明窗口压在别的程序上
+            if (hidden && _interactionRegions.Count == 0 && _primaryMovingRegion == null)
+            {
+                ScheduleOverlayBottom();
+            }
         }
 
         private void SetRegionHidden(RegionControl region, bool hidden, double fadeSeconds)
@@ -2259,6 +2592,10 @@ namespace GhostDesk
             else
             {
                 _interactionRegions.Remove(region);
+                if (_interactionRegions.Count == 0)
+                {
+                    ScheduleOverlayBottom();
+                }
             }
         }
 

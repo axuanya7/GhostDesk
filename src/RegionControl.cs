@@ -70,6 +70,9 @@ namespace GhostDesk
         private bool _autoExpanded;
         private bool _pinnedExpanded;
         private Action<RegionControl> _layoutChangedCallback;
+
+        /// <summary>贴边朝向变化后的回调，由桌面窗口负责重新布局。</summary>
+        private Action<RegionControl> _dockAnchorChangedCallback;
         private string _collapseHoverTrigger;
         private TextBox _renameBox;
         private DesktopItemControl _internalDragItem;
@@ -136,6 +139,11 @@ namespace GhostDesk
         public void SetLayoutChangedCallback(Action<RegionControl> callback)
         {
             _layoutChangedCallback = callback;
+        }
+
+        public void SetDockAnchorChangedCallback(Action<RegionControl> callback)
+        {
+            _dockAnchorChangedCallback = callback;
         }
 
         public void RefreshDockLayout()
@@ -860,6 +868,10 @@ namespace GhostDesk
             addFolder.Click += AddFolder_Click;
             menu.Items.Add(addFolder);
 
+            MenuItem addScanned = new MenuItem { Header = "批量添加快捷方式..." };
+            addScanned.Click += AddScannedApps_Click;
+            menu.Items.Add(addScanned);
+
             MenuItem create = new MenuItem { Header = "新建" };
             MenuItem createFolder = new MenuItem { Header = "文件夹" };
             createFolder.Click += NewFolder_Click;
@@ -869,6 +881,17 @@ namespace GhostDesk
             createTextDocument.Click += NewTextDocument_Click;
             create.Items.Add(createTextDocument);
             menu.Items.Add(create);
+
+            menu.Items.Add(new Separator());
+
+            MenuItem dock = new MenuItem { Header = "贴边方向" };
+            AddDockAnchorOption(dock, "自动判断", RegionConfig.DockAnchorAuto);
+            AddDockAnchorOption(dock, "固定在上边", RegionConfig.DockTop);
+            AddDockAnchorOption(dock, "固定在下边", RegionConfig.DockBottom);
+            AddDockAnchorOption(dock, "固定在左边", RegionConfig.DockLeft);
+            AddDockAnchorOption(dock, "固定在右边", RegionConfig.DockRight);
+            menu.Items.Add(dock);
+            menu.Opened += delegate { RefreshDockAnchorChecks(dock); };
 
             menu.Items.Add(new Separator());
 
@@ -922,7 +945,139 @@ namespace GhostDesk
             }
         }
 
-        private sealed class WindowOwnerHandle : System.Windows.Forms.IWin32Window
+        /// <summary>扫描开始菜单和桌面，批量添加快捷方式。</summary>
+        private void AddScannedApps_Click(object sender, RoutedEventArgs e)
+        {
+            List<ScannedShortcut> scanned;
+            try
+            {
+                scanned = AppScanner.Scan();
+            }
+            catch (Exception ex)
+            {
+                ShowOperationError(
+                    "扫描快捷方式失败：\n\n" + ex.Message,
+                    "GhostDesk");
+                return;
+            }
+
+            if (scanned.Count == 0)
+            {
+                ShowOperationError(
+                    "没有在开始菜单或桌面上找到可添加的快捷方式。",
+                    "GhostDesk");
+                return;
+            }
+
+            Window owner = Window.GetWindow(this);
+            AppPickerWindow picker = new AppPickerWindow(scanned);
+            if (owner != null && !ReferenceEquals(owner, this))
+            {
+                picker.Owner = owner;
+            }
+
+            bool? accepted = picker.ShowDialog();
+            if (accepted != true)
+            {
+                return;
+            }
+
+            foreach (string path in picker.SelectedPaths)
+            {
+                AddPath(path);
+            }
+        }
+
+        private void AddDockAnchorOption(MenuItem parent, string header, string anchor)
+        {
+            MenuItem option = new MenuItem();
+            option.Header = header;
+            option.Tag = anchor;
+            option.IsCheckable = true;
+            option.Click += DockAnchor_Click;
+            parent.Items.Add(option);
+        }
+
+        /// <summary>
+        /// 「固定在上/下/左/右」只改变标题栏朝向，不移动分区位置；
+        /// 「自动判断」标题跟随贴边方向；「不贴边（自由摆放）」位置完全自由。
+        /// </summary>
+        private void DockAnchor_Click(object sender, RoutedEventArgs e)
+        {
+            MenuItem option = sender as MenuItem;
+            if (option == null)
+            {
+                return;
+            }
+
+            string value = (option.Tag as string) ?? RegionConfig.DockAnchorAuto;
+            bool positionChanged = false;
+
+            if (string.Equals(value, RegionConfig.DockAnchorAuto, StringComparison.Ordinal))
+            {
+                _model.TitleSide = "";
+                _model.DockAnchor = RegionConfig.DockAnchorAuto;
+                positionChanged = true;
+            }
+            else
+            {
+                _model.TitleSide = ConfigStore.NormalizeTitleSide(value);
+            }
+
+            MenuItem parent = option.Parent as MenuItem;
+            if (parent != null)
+            {
+                RefreshDockAnchorChecks(parent);
+            }
+
+            UpdateDockChrome();
+            if (_collapsed)
+            {
+                ApplyCollapsedDimensions();
+            }
+            else
+            {
+                Width = _expandedWidth;
+                Height = _expandedHeight;
+            }
+
+            if (positionChanged && _dockAnchorChangedCallback != null)
+            {
+                _dockAnchorChangedCallback(this);
+            }
+
+            NotifyLayoutChanged();
+            NotifyChanged();
+        }
+
+        private void RefreshDockAnchorChecks(MenuItem dock)
+        {
+            if (dock == null)
+            {
+                return;
+            }
+
+            string titleSide = ConfigStore.NormalizeTitleSide(_model.TitleSide);
+
+            foreach (object entry in dock.Items)
+            {
+                MenuItem option = entry as MenuItem;
+                if (option == null)
+                {
+                    continue;
+                }
+
+                string value = (option.Tag as string) ?? RegionConfig.DockAnchorAuto;
+                bool isChecked = string.Equals(
+                    value,
+                    RegionConfig.DockAnchorAuto,
+                    StringComparison.Ordinal)
+                    ? titleSide.Length == 0
+                    : string.Equals(titleSide, value, StringComparison.Ordinal);
+
+                option.IsChecked = isChecked;
+            }
+        }        private sealed class WindowOwnerHandle : System.Windows.Forms.IWin32Window
         {
             private readonly IntPtr _handle;
 
@@ -1336,16 +1491,20 @@ namespace GhostDesk
                 6.0);
         }
 
+        /// <summary>标题实际朝向：手动指定优先，未指定时跟随贴边方向。</summary>
+        private string GetTitleSide()
+        {
+            string side = ConfigStore.NormalizeTitleSide(_model.TitleSide);
+            return string.IsNullOrEmpty(side)
+                ? (_model.DockEdge ?? RegionConfig.DockNone)
+                : side;
+        }
+
         private bool IsVerticalDock()
         {
-            return string.Equals(
-                       _model.DockEdge,
-                       RegionConfig.DockLeft,
-                       StringComparison.Ordinal) ||
-                   string.Equals(
-                       _model.DockEdge,
-                       RegionConfig.DockRight,
-                       StringComparison.Ordinal);
+            string side = GetTitleSide();
+            return string.Equals(side, RegionConfig.DockLeft, StringComparison.Ordinal) ||
+                string.Equals(side, RegionConfig.DockRight, StringComparison.Ordinal);
         }
 
         private void UpdateDockChrome()
@@ -1358,7 +1517,7 @@ namespace GhostDesk
                 return;
             }
 
-            string edge = _model.DockEdge ?? RegionConfig.DockNone;
+            string edge = GetTitleSide() ?? RegionConfig.DockNone;
             bool vertical = IsVerticalDock();
             bool bottom =
                 string.Equals(edge, RegionConfig.DockBottom, StringComparison.Ordinal);

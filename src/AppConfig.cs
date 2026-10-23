@@ -101,6 +101,12 @@ namespace GhostDesk
         public const string DockLeft = "left";
         public const string DockRight = "right";
 
+        /// <summary>贴边方向由程序按松手位置自动判断。</summary>
+        public const string DockAnchorAuto = "auto";
+
+        /// <summary>该分区永不自动贴边，可以自由摆放。</summary>
+        public const string DockAnchorFree = "free";
+
         [DataMember]
         public string Id { get; set; }
 
@@ -121,6 +127,14 @@ namespace GhostDesk
 
         [DataMember]
         public string DockEdge { get; set; }
+
+        /// <summary>是否允许自动贴边：auto（贴）/ free（自由摆放，不贴边）。</summary>
+        [DataMember]
+        public string DockAnchor { get; set; }
+
+        /// <summary>标题朝向：空=跟随贴边方向，其余 top/bottom/left/right 只改标题栏方向，不改位置。</summary>
+        [DataMember]
+        public string TitleSide { get; set; }
 
         [DataMember]
         public int DockOrder { get; set; }
@@ -212,6 +226,72 @@ namespace GhostDesk
 
         [DataMember]
         public bool? EnableSnap { get; set; }
+
+        /// <summary>拖到屏幕边缘时是否自动贴边（关闭后分区可以自由摆放）。</summary>
+        [DataMember]
+        public bool? EnableEdgeDock { get; set; }
+
+        /// <summary>贴边判定的边缘带宽度（像素），越大越容易贴边。</summary>
+        [DataMember]
+        public int? EdgeDockBand { get; set; }
+
+        /// <summary>顶部安全边距（像素），用于让开 Rainmeter 时钟条一类的桌面挂件。</summary>
+        [DataMember]
+        public int? SafeInsetTop { get; set; }
+
+        /// <summary>底部安全边距（像素），用于让开任务栏。</summary>
+        [DataMember]
+        public int? SafeInsetBottom { get; set; }
+
+        /// <summary>左侧安全边距（像素）。</summary>
+        [DataMember]
+        public int? SafeInsetLeft { get; set; }
+
+        /// <summary>右侧安全边距（像素）。</summary>
+        [DataMember]
+        public int? SafeInsetRight { get; set; }
+
+        /// <summary>默认的贴边判定带宽，与旧版本行为一致（2 像素）。</summary>
+        public const int DefaultEdgeDockBand = 2;
+
+        public bool IsEdgeDockEnabled()
+        {
+            return EnableEdgeDock != false;
+        }
+
+        public double GetEdgeDockBand()
+        {
+            if (!EdgeDockBand.HasValue)
+            {
+                return DefaultEdgeDockBand;
+            }
+
+            return Math.Max(0, Math.Min(240, EdgeDockBand.Value));
+        }
+
+        /// <summary>取某一侧的安全边距，edge 用 RegionConfig.Dock* 常量。</summary>
+        public double GetSafeInset(string edge)
+        {
+            int? value = null;
+            if (string.Equals(edge, RegionConfig.DockTop, StringComparison.Ordinal))
+            {
+                value = SafeInsetTop;
+            }
+            else if (string.Equals(edge, RegionConfig.DockBottom, StringComparison.Ordinal))
+            {
+                value = SafeInsetBottom;
+            }
+            else if (string.Equals(edge, RegionConfig.DockLeft, StringComparison.Ordinal))
+            {
+                value = SafeInsetLeft;
+            }
+            else if (string.Equals(edge, RegionConfig.DockRight, StringComparison.Ordinal))
+            {
+                value = SafeInsetRight;
+            }
+
+            return value.HasValue && value.Value > 0 ? value.Value : 0.0;
+        }
 
         [DataMember]
         public bool? EnableAutoReplace { get; set; }
@@ -466,6 +546,12 @@ namespace GhostDesk
                 sb.AppendLine("  \"LastUpdateCheck\": \"" + Escape(config.LastUpdateCheck) + "\",");
                 sb.AppendLine("  \"SkippedVersion\": \"" + Escape(config.SkippedVersion) + "\",");
                 sb.AppendLine("  \"EnableSnap\": " + (config.EnableSnap == true ? "true" : "false") + ",");
+                sb.AppendLine("  \"EnableEdgeDock\": " + (config.EnableEdgeDock != false ? "true" : "false") + ",");
+                sb.AppendLine("  \"EdgeDockBand\": " + config.GetEdgeDockBand().ToString("0", CultureInfo.InvariantCulture) + ",");
+                sb.AppendLine("  \"SafeInsetTop\": " + FormatInset(config.SafeInsetTop) + ",");
+                sb.AppendLine("  \"SafeInsetBottom\": " + FormatInset(config.SafeInsetBottom) + ",");
+                sb.AppendLine("  \"SafeInsetLeft\": " + FormatInset(config.SafeInsetLeft) + ",");
+                sb.AppendLine("  \"SafeInsetRight\": " + FormatInset(config.SafeInsetRight) + ",");
                 sb.AppendLine("  \"EnableAutoReplace\": " + (config.EnableAutoReplace == true ? "true" : "false") + ",");
                 sb.AppendLine("  \"CollapseHoverTrigger\": \"" + Escape(config.CollapseHoverTrigger) + "\",");
                 sb.AppendLine("  \"Mode\": \"" + Escape(config.Mode) + "\",");
@@ -482,6 +568,8 @@ namespace GhostDesk
                     sb.AppendLine("      \"Width\": " + Inv(region.Width) + ",");
                     sb.AppendLine("      \"Height\": " + Inv(region.Height) + ",");
                     sb.AppendLine("      \"DockEdge\": \"" + Escape(region.DockEdge) + "\",");
+                    sb.AppendLine("      \"DockAnchor\": \"" + Escape(region.DockAnchor) + "\",");
+                    sb.AppendLine("      \"TitleSide\": \"" + Escape(region.TitleSide) + "\",");
                     sb.AppendLine("      \"DockOrder\": " + region.DockOrder.ToString(CultureInfo.InvariantCulture) + ",");
                     sb.AppendLine("      \"ShowExtensions\": \"" + Escape(region.ShowExtensions) + "\",");
                     sb.AppendLine("      \"Items\": [");
@@ -1084,6 +1172,36 @@ namespace GhostDesk
             {
                 config.EnableSnap = true;
             }
+            if (!config.EnableEdgeDock.HasValue)
+            {
+                config.EnableEdgeDock = true;
+            }
+            if (!config.EdgeDockBand.HasValue)
+            {
+                config.EdgeDockBand = AppConfig.DefaultEdgeDockBand;
+            }
+            else
+            {
+                config.EdgeDockBand = Math.Max(
+                    0,
+                    Math.Min(240, config.EdgeDockBand.Value));
+            }
+            if (!config.SafeInsetTop.HasValue)
+            {
+                config.SafeInsetTop = 0;
+            }
+            if (!config.SafeInsetBottom.HasValue)
+            {
+                config.SafeInsetBottom = 0;
+            }
+            if (!config.SafeInsetLeft.HasValue)
+            {
+                config.SafeInsetLeft = 0;
+            }
+            if (!config.SafeInsetRight.HasValue)
+            {
+                config.SafeInsetRight = 0;
+            }
             if (!config.EnableAutoReplace.HasValue)
             {
                 config.EnableAutoReplace = true;
@@ -1131,6 +1249,19 @@ namespace GhostDesk
                     region.Height = 72;
                 }
                 region.DockEdge = NormalizeDockEdge(region.DockEdge);
+                region.DockAnchor = NormalizeDockAnchor(region.DockAnchor);
+                region.TitleSide = NormalizeTitleSide(region.TitleSide);
+                // 旧版本把「固定四边」写在 DockAnchor 里，这里迁移成标题朝向，位置交还给自动贴边
+                if (region.DockAnchor != RegionConfig.DockAnchorFree &&
+                    region.DockAnchor != RegionConfig.DockAnchorAuto)
+                {
+                    if (string.IsNullOrEmpty(region.TitleSide))
+                    {
+                        region.TitleSide = region.DockAnchor;
+                    }
+
+                    region.DockAnchor = RegionConfig.DockAnchorAuto;
+                }
                 if (string.IsNullOrEmpty(region.DockEdge))
                 {
                     region.DockOrder = 0;
@@ -1533,6 +1664,55 @@ namespace GhostDesk
             }
 
             return RegionConfig.DockNone;
+        }
+
+        /// <summary>把分区贴边朝向归一到 auto / top / bottom / left / right / free。</summary>
+        internal static string NormalizeDockAnchor(string anchor)
+        {
+            if (string.IsNullOrWhiteSpace(anchor))
+            {
+                return RegionConfig.DockAnchorAuto;
+            }
+
+            string value = anchor.Trim().ToLowerInvariant();
+            if (value == RegionConfig.DockAnchorAuto ||
+                value == RegionConfig.DockTop ||
+                value == RegionConfig.DockBottom ||
+                value == RegionConfig.DockLeft ||
+                value == RegionConfig.DockRight)
+            {
+                return value;
+            }
+
+            // 「不贴边」已取消，旧配置统一回到自动判断
+            return RegionConfig.DockAnchorAuto;
+        }
+
+        /// <summary>标题朝向只允许空（自动）或 top/bottom/left/right。</summary>
+        internal static string NormalizeTitleSide(string side)
+        {
+            if (string.IsNullOrWhiteSpace(side))
+            {
+                return "";
+            }
+
+            string value = side.Trim().ToLowerInvariant();
+            if (value == RegionConfig.DockTop ||
+                value == RegionConfig.DockBottom ||
+                value == RegionConfig.DockLeft ||
+                value == RegionConfig.DockRight)
+            {
+                return value;
+            }
+
+            return "";
+        }
+
+        private static string FormatInset(int? value)
+        {
+            return value.HasValue && value.Value > 0
+                ? value.Value.ToString(CultureInfo.InvariantCulture)
+                : "0";
         }
 
         private static void TryBackupBrokenConfig()

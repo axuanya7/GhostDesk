@@ -58,6 +58,15 @@ namespace GhostDesk
         private CheckBox _showHiddenFilesCheck;
         private bool _suppressVisibilityChange;
         private CheckBox _enableSnapCheck;
+        private TextBox _edgeDockBandBox;
+        private TextBox _safeTopBox;
+        private TextBox _safeBottomBox;
+        private TextBox _safeSideBox;
+        private Slider _edgeDockBandSlider;
+        private Slider _safeTopSlider;
+        private Slider _safeBottomSlider;
+        private Slider _safeSideSlider;
+        private bool _dockSyncBusy;
         private CheckBox _showExtensionsCheck;
         private Slider _backupIntervalSlider;
         private TextBlock _backupIntervalValue;
@@ -94,14 +103,19 @@ namespace GhostDesk
             _checkForUpdates = checkForUpdates;
             _scheduledTasks = scheduledTasks;
 
-            Title = "GhostDesk";
-            Width = 860;
-            Height = 600;
+            Title = "GhostDesk 设置";
+            Width = 900;
+            Height = 640;
             MinWidth = 820;
             MinHeight = 540;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            ResizeMode = ResizeMode.CanMinimize;
-            GlassTheme.ConfigureWindow(this);
+            // 用系统标准窗体：原生标题栏、最小化/最大化/关闭、可缩放、可贴边、有投影，行为与资源管理器一致
+            WindowStyle = WindowStyle.SingleBorderWindow;
+            ResizeMode = ResizeMode.CanResize;
+            AllowsTransparency = false;
+            Background = WindowSurfaceBrush;
+            FontFamily = new FontFamily("Microsoft YaHei UI");
+            Foreground = GlassTheme.TextPrimaryBrush;
             SourceInitialized += SettingsWindow_SourceInitialized;
             Closed += delegate
             {
@@ -137,6 +151,39 @@ namespace GhostDesk
             {
                 _windowRoot.Background = WindowSurfaceBrush;
             }
+
+            ApplyDarkTitleBar();
+        }
+
+        /// <summary>把系统标题栏切成深色，和窗口内容统一。</summary>
+        private void ApplyDarkTitleBar()
+        {
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                int enabled = 1;
+                // DWMWA_USE_IMMERSIVE_DARK_MODE：Win10 20H1+ 是 20，早期版本是 19
+                if (NativeMethods.DwmSetWindowAttribute(
+                        hwnd,
+                        20,
+                        ref enabled,
+                        sizeof(int)) != 0)
+                {
+                    NativeMethods.DwmSetWindowAttribute(
+                        hwnd,
+                        19,
+                        ref enabled,
+                        sizeof(int));
+                }
+            }
+            catch
+            {
+            }
         }
 
         private UIElement BuildShell()
@@ -147,7 +194,7 @@ namespace GhostDesk
             _windowRoot.Background = WindowSurfaceBrush;
             _windowRoot.BorderBrush = GlassTheme.CreateBrush(56, 255, 255, 255);
             _windowRoot.BorderThickness = new Thickness(1);
-            _windowRoot.CornerRadius = new CornerRadius(16);
+            _windowRoot.CornerRadius = new CornerRadius(0);
 
             sidebar.Background = SidebarSurfaceBrush;
             sidebar.BorderBrush = GlassTheme.CreateBrush(28, 255, 255, 255);
@@ -161,7 +208,6 @@ namespace GhostDesk
             main.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             main.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            main.Children.Add(BuildTitlebar());
 
             Grid header = BuildHeader();
             Grid.SetRow(header, 1);
@@ -538,6 +584,79 @@ namespace GhostDesk
             tools.Children.Add(_showExtensionsCheck);
 
             page.Children.Add(tools);
+            StackPanel dockPanel = new StackPanel();
+            dockPanel.Margin = new Thickness(0, 0, 0, 8);
+
+            Grid dockGrid = new Grid();
+            dockGrid.ColumnDefinitions.Add(
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            dockGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
+            dockGrid.ColumnDefinitions.Add(
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            dockGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            dockGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            _edgeDockBandBox = CreateNumberBox(
+                _config.GetEdgeDockBand(),
+                0,
+                240,
+                1,
+                EdgeDockBand_Changed);
+            _edgeDockBandSlider = CreateDockSlider(
+                _config.GetEdgeDockBand(),
+                0,
+                240,
+                1,
+                _edgeDockBandBox);
+            AddDockField(dockGrid, 0, 0, "贴边灵敏度", _edgeDockBandSlider, _edgeDockBandBox);
+
+            _safeTopBox = CreateNumberBox(
+                _config.GetSafeInset(RegionConfig.DockTop),
+                0,
+                400,
+                4,
+                SafeInset_Changed);
+            _safeTopSlider = CreateDockSlider(
+                _config.GetSafeInset(RegionConfig.DockTop),
+                0,
+                400,
+                4,
+                _safeTopBox);
+            AddDockField(dockGrid, 0, 2, "顶部安全边距", _safeTopSlider, _safeTopBox);
+
+            _safeBottomBox = CreateNumberBox(
+                _config.GetSafeInset(RegionConfig.DockBottom),
+                0,
+                400,
+                4,
+                SafeInset_Changed);
+            _safeBottomSlider = CreateDockSlider(
+                _config.GetSafeInset(RegionConfig.DockBottom),
+                0,
+                400,
+                4,
+                _safeBottomBox);
+            AddDockField(dockGrid, 1, 0, "底部安全边距", _safeBottomSlider, _safeBottomBox);
+
+            double sideInset = Math.Max(
+                _config.GetSafeInset(RegionConfig.DockLeft),
+                _config.GetSafeInset(RegionConfig.DockRight));
+            _safeSideBox = CreateNumberBox(sideInset, 0, 400, 4, SafeInset_Changed);
+            _safeSideSlider = CreateDockSlider(sideInset, 0, 400, 4, _safeSideBox);
+            AddDockField(dockGrid, 1, 2, "左右安全边距", _safeSideSlider, _safeSideBox);
+
+            dockPanel.Children.Add(dockGrid);
+
+            TextBlock dockHint = GlassTheme.CreateText(
+                "每个分区的朝向在分区右键「贴边方向」里单独设置（自动判断 / 固定四边 / 不贴边），"
+                    + "灵敏度只影响「自动判断」。滑块、输入框、鼠标滚轮三者联动。",
+                12,
+                true);
+            dockHint.TextWrapping = TextWrapping.Wrap;
+            dockHint.Margin = new Thickness(0, 4, 0, 0);
+            dockPanel.Children.Add(dockHint);
+
+            page.Children.Add(dockPanel);
 
             TextBlock hint = GlassTheme.CreateText(
                 "拖到屏幕边缘始终会贴边。开启分区成组吸附后，相邻分区会按松开位置排序，并可成组拖动。扩展名设置会统一应用到所有分区。",
@@ -2463,6 +2582,264 @@ namespace GhostDesk
 
             _config.BackupMaxCount = (int)Math.Round(e.NewValue, 0);
             _backupCountValue.Text = ((int)e.NewValue).ToString() + " 份";
+        }
+
+
+        private void EdgeDockBand_Changed(object sender, RoutedEventArgs e)
+        {
+            SyncSliderFromBox(_edgeDockBandSlider, _edgeDockBandBox, 0, 240);
+            ApplyDockValuesFromControls();
+        }
+
+        private void SafeInset_Changed(object sender, RoutedEventArgs e)
+        {
+            SyncSliderFromBox(_safeTopSlider, _safeTopBox, 0, 400);
+            SyncSliderFromBox(_safeBottomSlider, _safeBottomBox, 0, 400);
+            SyncSliderFromBox(_safeSideSlider, _safeSideBox, 0, 400);
+            ApplyDockValuesFromControls();
+        }
+
+        /// <summary>滑块拖动：把数值同步回输入框并立刻生效。</summary>
+        private void DockSlider_Changed(
+            object sender,
+            RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_dockSyncBusy)
+            {
+                return;
+            }
+
+            Slider slider = sender as Slider;
+            if (slider == null)
+            {
+                return;
+            }
+
+            _dockSyncBusy = true;
+            try
+            {
+                int value = (int)Math.Round(e.NewValue);
+                TextBox box = slider.Tag as TextBox;
+                if (box != null)
+                {
+                    string text = value.ToString();
+                    if (!string.Equals(box.Text, text, StringComparison.Ordinal))
+                    {
+                        box.Text = text;
+                    }
+                }
+
+                ApplyDockValuesFromControls();
+            }
+            finally
+            {
+                _dockSyncBusy = false;
+            }
+        }
+
+        private void SyncSliderFromBox(
+            Slider slider,
+            TextBox box,
+            int min,
+            int max)
+        {
+            if (slider == null || box == null)
+            {
+                return;
+            }
+
+            int value = ParseDockValue(box, min, max);
+            if (Math.Abs(slider.Value - value) <= 0.01)
+            {
+                return;
+            }
+
+            _dockSyncBusy = true;
+            try
+            {
+                slider.Value = value;
+            }
+            finally
+            {
+                _dockSyncBusy = false;
+            }
+        }
+
+        private static int ParseDockValue(TextBox box, int min, int max)
+        {
+            int value;
+            if (!int.TryParse((box.Text ?? "").Trim(), out value))
+            {
+                value = min;
+            }
+
+            return Math.Max(min, Math.Min(max, value));
+        }
+
+        /// <summary>把四条参数当前控件的值写回配置并即时生效。</summary>
+        private void ApplyDockValuesFromControls()
+        {
+            if (_edgeDockBandBox == null ||
+                _safeTopBox == null ||
+                _safeBottomBox == null ||
+                _safeSideBox == null)
+            {
+                return;
+            }
+
+            int band = ParseDockValue(_edgeDockBandBox, 0, 240);
+            int top = ParseDockValue(_safeTopBox, 0, 400);
+            int bottom = ParseDockValue(_safeBottomBox, 0, 400);
+            int side = ParseDockValue(_safeSideBox, 0, 400);
+            _config.EdgeDockBand = band;
+            _config.SafeInsetTop = top;
+            _config.SafeInsetBottom = bottom;
+            _config.SafeInsetLeft = side;
+            _config.SafeInsetRight = side;
+            ApplyDockSettings();
+        }
+
+        private void ApplyDockSettings()
+        {
+            ConfigStore.Save(_config);
+            if (_desktop != null)
+            {
+                _desktop.ApplyDockSettings();
+            }
+        }
+
+        /// <summary>参数用的短滑块（宽度受限，配合右侧输入框使用）。</summary>
+        private Slider CreateDockSlider(
+            double value,
+            double min,
+            double max,
+            double step,
+            TextBox box)
+        {
+            Slider slider = new Slider();
+            slider.Minimum = min;
+            slider.Maximum = max;
+            slider.SmallChange = step;
+            slider.LargeChange = step * 5.0;
+            slider.TickFrequency = step;
+            slider.Width = 116;
+            slider.VerticalAlignment = VerticalAlignment.Center;
+            slider.Margin = new Thickness(0, 0, 10, 0);
+            slider.Tag = box;
+            slider.Value = Math.Max(min, Math.Min(max, value));
+            slider.ValueChanged += DockSlider_Changed;
+            return slider;
+        }
+
+        /// <summary>数字输入框：可直接输入，也能用鼠标滚轮微调。</summary>
+        private TextBox CreateNumberBox(
+            double value,
+            int min,
+            int max,
+            int step,
+            RoutedEventHandler commit)
+        {
+            TextBox box = new TextBox();
+            box.Width = 70;
+            box.FontSize = 13;
+            box.Text = ((int)Math.Round(value)).ToString();
+            box.TextAlignment = TextAlignment.Right;
+            box.Padding = new Thickness(6, 4, 6, 4);
+            box.VerticalAlignment = VerticalAlignment.Center;
+            box.HorizontalAlignment = HorizontalAlignment.Left;
+            box.Background = GlassTheme.CreateBrush(90, 255, 255, 255);
+            box.Foreground = GlassTheme.CreateBrush(240, 255, 255, 255);
+            box.CaretBrush = GlassTheme.CreateBrush(240, 255, 255, 255);
+            box.BorderBrush = GlassTheme.CreateBrush(70, 255, 255, 255);
+            box.BorderThickness = new Thickness(1);
+            box.Tag = new int[] { min, max, step };
+
+            box.PreviewMouseWheel += delegate(object sender, MouseWheelEventArgs e)
+            {
+                int[] range = box.Tag as int[];
+                if (range == null)
+                {
+                    return;
+                }
+
+                int current;
+                if (!int.TryParse((box.Text ?? "").Trim(), out current))
+                {
+                    current = range[0];
+                }
+
+                int delta = e.Delta > 0 ? range[2] : -range[2];
+                int next = Math.Max(range[0], Math.Min(range[1], current + delta));
+                box.Text = next.ToString();
+                if (commit != null)
+                {
+                    commit(box, new RoutedEventArgs());
+                }
+
+                e.Handled = true;
+            };
+
+            box.LostFocus += delegate
+            {
+                if (commit != null)
+                {
+                    commit(box, new RoutedEventArgs());
+                }
+            };
+
+            box.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.Key != Key.Enter)
+                {
+                    return;
+                }
+
+                if (commit != null)
+                {
+                    commit(box, new RoutedEventArgs());
+                }
+
+                e.Handled = true;
+            };
+
+            return box;
+        }
+
+        /// <summary>「标签 + 短滑块 + 输入框 + 单位」放成紧凑的一格。</summary>
+        private void AddDockField(
+            Grid grid,
+            int row,
+            int column,
+            string label,
+            Slider slider,
+            TextBox box)
+        {
+            StackPanel cell = new StackPanel();
+            cell.Margin = new Thickness(0, 2, 0, 6);
+            Grid.SetRow(cell, row);
+            Grid.SetColumn(cell, column);
+
+            TextBlock caption = GlassTheme.CreateText(label, 13, false);
+            caption.FontWeight = FontWeights.SemiBold;
+            caption.Margin = new Thickness(0, 0, 0, 4);
+            cell.Children.Add(caption);
+
+            StackPanel line = new StackPanel();
+            line.Orientation = Orientation.Horizontal;
+            if (slider != null)
+            {
+                line.Children.Add(slider);
+            }
+
+            line.Children.Add(box);
+
+            TextBlock unitText = GlassTheme.CreateText("px", 12, true);
+            unitText.VerticalAlignment = VerticalAlignment.Center;
+            unitText.Margin = new Thickness(6, 0, 0, 0);
+            line.Children.Add(unitText);
+
+            cell.Children.Add(line);
+            grid.Children.Add(cell);
         }
 
         private void EnableSnap_Changed(object sender, RoutedEventArgs e)

@@ -99,6 +99,22 @@ namespace GhostDesk
             menu.HasDropShadow = true;
             menu.SnapsToDevicePixels = true;
             menu.UseLayoutRounding = true;
+
+            // 菜单打开期间通知桌面层取消覆盖层置顶，否则菜单会被分区挡住
+            menu.Opened += delegate { NotifyContextMenuVisibility(true); };
+            menu.Closed += delegate { NotifyContextMenuVisibility(false); };
+        }
+
+        /// <summary>右键菜单打开/关闭通知，true = 打开。</summary>
+        internal static Action<bool> ContextMenuVisibilityChanged;
+
+        private static void NotifyContextMenuVisibility(bool opened)
+        {
+            Action<bool> handler = ContextMenuVisibilityChanged;
+            if (handler != null)
+            {
+                handler(opened);
+            }
         }
 
         private static Style CreateContextMenuStyle()
