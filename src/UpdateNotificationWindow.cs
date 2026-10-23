@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace GhostDesk
 {
@@ -336,6 +337,12 @@ namespace GhostDesk
 
             ShowProgress();
 
+            // 开始下载后把进度窗口挪到右下角，避免挡住正在做的事
+            Topmost = true;
+            Dispatcher.BeginInvoke(
+                new Action(delegate { MoveToBottomRight(); }),
+                DispatcherPriority.Loaded);
+
             try
             {
                 _downloadAction(
@@ -361,6 +368,30 @@ namespace GhostDesk
                     CompleteDownload(ex.Message);
                 }));
             }
+        }
+
+        /// <summary>把窗口挪到屏幕右下角（贴合工作区，自动让开任务栏）。</summary>
+        private void MoveToBottomRight()
+        {
+            UpdateLayout();
+
+            Rect area = SystemParameters.WorkArea;
+            double margin = 16.0;
+
+            double width = ActualWidth;
+            if (double.IsNaN(width) || width <= 0.0)
+            {
+                width = Width;
+            }
+
+            double height = ActualHeight;
+            if (double.IsNaN(height) || height <= 0.0)
+            {
+                height = 220.0;
+            }
+
+            Left = Math.Max(area.Left + margin, area.Right - width - margin);
+            Top = Math.Max(area.Top + margin, area.Bottom - height - margin);
         }
 
         private void ShowProgress()
