@@ -1045,46 +1045,18 @@ namespace GhostDesk
 
             double availableAlong = horizontal ? availableWidth : availableHeight;
 
-            // 只做「避免重叠」：每个分区保留自己的位置，只有和正在拖动的分区（或已放置的）
-            // 靠得比 RegionGap 更近时才顺着推开，不会像成组吸附那样整排重排。
             List<RegionControl> ordered = new List<RegionControl>(docked);
-            ordered.Sort(delegate(RegionControl first, RegionControl second)
-            {
-                if (anchor != null)
-                {
-                    if (ReferenceEquals(first, anchor))
-                    {
-                        return -1;
-                    }
-                    if (ReferenceEquals(second, anchor))
-                    {
-                        return 1;
-                    }
-                }
-
-                double firstAlong = horizontal
-                    ? GetRegionPosition(first).X - usable.Left
-                    : GetRegionPosition(first).Y - usable.Top;
-                double secondAlong = horizontal
-                    ? GetRegionPosition(second).X - usable.Left
-                    : GetRegionPosition(second).Y - usable.Top;
-                return firstAlong.CompareTo(secondAlong);
-            });
-
-            double gap = RegionGap;
-            List<RegionControl> placed = new List<RegionControl>();
             Dictionary<RegionControl, double> starts =
                 new Dictionary<RegionControl, double>();
-            Dictionary<RegionControl, double> sizes =
-                new Dictionary<RegionControl, double>();
 
+            // 只做「贴边 + 夹进工作区」：同一个边上放多个分区时允许重叠，
+            // 不会再自动把别的分区推开（旧实现的避让逻辑会让其它分区莫名移位）。
             foreach (RegionControl region in ordered)
             {
                 double width;
                 double height;
                 GetRegionSize(region, out width, out height);
                 double size = horizontal ? width : height;
-                sizes[region] = size;
 
                 double along = anchor != null && ReferenceEquals(region, anchor)
                     ? anchorPosition
@@ -1092,35 +1064,11 @@ namespace GhostDesk
                         ? GetRegionPosition(region).X - usable.Left
                         : GetRegionPosition(region).Y - usable.Top);
 
-                along = Math.Max(
-                    0.0,
-                    Math.Min(Math.Max(0.0, availableAlong - size), along));
-
-                bool shifted = true;
-                int guard = 0;
-                while (shifted && guard++ < 64)
-                {
-                    shifted = false;
-                    foreach (RegionControl other in placed)
-                    {
-                        double otherStart = starts[other];
-                        double otherSize = sizes[other];
-                        if (along < otherStart + otherSize + gap &&
-                            along + size > otherStart - gap)
-                        {
-                            along = otherStart + otherSize + gap;
-                            shifted = true;
-                        }
-                    }
-                }
-
                 starts[region] = Math.Max(
                     0.0,
                     Math.Min(Math.Max(0.0, availableAlong - size), along));
-                placed.Add(region);
             }
-
-            foreach (RegionControl region in placed)
+            foreach (RegionControl region in ordered)
             {
                 double width;
                 double height;
