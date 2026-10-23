@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
+using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 
@@ -17,6 +19,12 @@ namespace GhostDesk
         public string DownloadUrl { get; set; }
 
         public string ReleaseNotes { get; set; }
+
+        /// <summary>本次汇总覆盖的版本数（例如从 1.2.0 直接升上来可能是 3 个）。</summary>
+        public int ReleaseCount { get; set; }
+
+        /// <summary>汇总提示语，例如「你当前是 1.2.0，下面是从 1.3.0 到 1.4.0 共 3 个版本的更新内容。」</summary>
+        public string NotesIntro { get; set; }
     }
 
     internal sealed class UpdateCheckResult
@@ -78,33 +86,7 @@ namespace GhostDesk
             {
                 try
                 {
-                    ReleaseInfo release = DownloadLatestRelease();
-                    if (release == null || string.IsNullOrWhiteSpace(release.TagName))
-                    {
-                        throw new InvalidOperationException("未能识别 GitHub 最新版本。");
-                    }
-
-                    string remoteVersion = NormalizeVersion(release.TagName);
-                    if (CompareVersions(remoteVersion, AppInfo.Version) <= 0)
-                    {
-                        return new UpdateCheckResult();
-                    }
-
-                    return new UpdateCheckResult
-                    {
-                        Update = new UpdateInfo
-                        {
-                            Version = remoteVersion,
-                            Name = "GhostDesk " + remoteVersion,
-                            Url = string.IsNullOrWhiteSpace(release.HtmlUrl)
-                                ? AppInfo.ReleasesUrl
-                                : release.HtmlUrl,
-                            DownloadUrl = BuildDownloadUrl(
-                                release.TagName,
-                                remoteVersion),
-                            ReleaseNotes = NormalizeNotes(release.Body)
-                        }
-                    };
+                    return CheckOnce();
                 }
                 catch (Exception ex)
                 {
@@ -122,6 +104,171 @@ namespace GhostDesk
             };
         }
 
+        /// <summary>
+        /// 取回版本列表，汇总「当前版本之后所有版本」的更新说明；
+        /// 列表接口不可用时退回「只看最新一版」的老逻辑。
+        /// </summary>
+        private static UpdateCheckResult CheckOnce()
+        {
+            List<ReleaseInfo> releases = null;
+            try
+            {
+                releases = DownloadReleaseList();
+            }
+            catch
+            {
+                releases = null;
+            }
+
+            if (releases == null || releases.Count == 0)
+            {
+                return CheckLatestOnly();
+            }
+
+            List<KeyValuePair<string, ReleaseInfo>> ordered =
+                new List<KeyValuePair<string, ReleaseInfo>>();
+            foreach (ReleaseInfo release in releases)
+            {
+                if (release == null ||
+                    release.Draft ||
+                    release.Prerelease ||
+                    string.IsNullOrWhiteSpace(release.TagName))
+                {
+                    continue;
+                }
+
+                string version = NormalizeVersion(release.TagName);
+                if (string.IsNullOrEmpty(version) || version == "0")
+                {
+                    continue;
+                }
+
+                ordered.Add(new KeyValuePair<string, ReleaseInfo>(version, release));
+            }
+
+            if (ordered.Count == 0)
+            {
+                return new UpdateCheckResult();
+            }
+
+            ordered.Sort(
+                delegate(
+                    KeyValuePair<string, ReleaseInfo> left,
+                    KeyValuePair<string, ReleaseInfo> right)
+                {
+                    return CompareVersions(right.Key, left.Key);
+                });
+
+            string latestVersion = ordered[0].Key;
+            if (CompareVersions(latestVersion, AppInfo.Version) <= 0)
+            {
+                return new UpdateCheckResult();
+            }
+
+            List<KeyValuePair<string, ReleaseInfo>> newer =
+                new List<KeyValuePair<string, ReleaseInfo>>();
+            foreach (KeyValuePair<string, ReleaseInfo> entry in ordered)
+            {
+                if (CompareVersions(entry.Key, AppInfo.Version) > 0)
+                {
+                    newer.Add(entry);
+                }
+            }
+
+            if (newer.Count == 0)
+            {
+                return new UpdateCheckResult();
+            }
+
+            ReleaseInfo latest = newer[0].Value;
+            StringBuilder notes = new StringBuilder();
+            foreach (KeyValuePair<string, ReleaseInfo> entry in newer)
+            {
+                notes.Append("──── GhostDesk ")
+                    .Append(entry.Key)
+                    .AppendLine(" ────");
+                notes.AppendLine(StripLeadingTitle(NormalizeNotes(entry.Value.Body), entry.Key));
+                notes.AppendLine();
+            }
+
+            string oldest = newer[newer.Count - 1].Key;
+            string intro = newer.Count == 1
+                ? "下面是 GhostDesk " + latestVersion + " 的更新内容。"
+                : "你当前是 " + AppInfo.Version + "，下面是从 " + oldest + " 到 " + latestVersion +
+                  " 共 " + newer.Count.ToString() + " 个版本的更新内容（新的在上）。";
+
+            return new UpdateCheckResult
+            {
+                Update = new UpdateInfo
+                {
+                    Version = latestVersion,
+                    Name = "GhostDesk " + latestVersion,
+                    Url = string.IsNullOrWhiteSpace(latest.HtmlUrl)
+                        ? AppInfo.ReleasesUrl
+                        : latest.HtmlUrl,
+                    DownloadUrl = BuildDownloadUrl(latest.TagName, latestVersion),
+                    ReleaseNotes = notes.ToString().Trim(),
+                    ReleaseCount = newer.Count,
+                    NotesIntro = intro
+                }
+            };
+        }
+
+        /// <summary>兜底：拿不到版本列表时只看最新一版。</summary>
+        private static UpdateCheckResult CheckLatestOnly()
+        {
+            ReleaseInfo release = DownloadLatestRelease();
+            if (release == null || string.IsNullOrWhiteSpace(release.TagName))
+            {
+                throw new InvalidOperationException("未能识别 GitHub 最新版本。");
+            }
+
+            string remoteVersion = NormalizeVersion(release.TagName);
+            if (CompareVersions(remoteVersion, AppInfo.Version) <= 0)
+            {
+                return new UpdateCheckResult();
+            }
+
+            return new UpdateCheckResult
+            {
+                Update = new UpdateInfo
+                {
+                    Version = remoteVersion,
+                    Name = "GhostDesk " + remoteVersion,
+                    Url = string.IsNullOrWhiteSpace(release.HtmlUrl)
+                        ? AppInfo.ReleasesUrl
+                        : release.HtmlUrl,
+                    DownloadUrl = BuildDownloadUrl(release.TagName, remoteVersion),
+                    ReleaseNotes = NormalizeNotes(release.Body),
+                    ReleaseCount = 1,
+                    NotesIntro = "下面是 GhostDesk " + remoteVersion + " 的更新内容。"
+                }
+            };
+        }
+
+        /// <summary>去掉正文里与版本号重复的首行标题（发布说明第一行通常是「GhostDesk 1.4.0」）。</summary>
+        private static string StripLeadingTitle(string body, string version)
+        {
+            if (string.IsNullOrEmpty(body))
+            {
+                return "";
+            }
+
+            string[] lines = body.Split('\n');
+            if (lines.Length == 0)
+            {
+                return body;
+            }
+
+            string first = lines[0].Trim();
+            if (string.Equals(first, "GhostDesk " + version, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(first, "GhostDesk v" + version, StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Join("\n", lines, 1, lines.Length - 1).Trim();
+            }
+
+            return body;
+        }
         private static string BuildDownloadUrl(string tagName, string version)
         {
             string tag = string.IsNullOrWhiteSpace(tagName) ? "v" + version : tagName.Trim();
@@ -137,6 +284,66 @@ namespace GhostDesk
             }
 
             return value.Replace("\r\n", "\n").Trim();
+        }
+
+        private static List<ReleaseInfo> DownloadReleaseList()
+        {
+            ServicePointManager.SecurityProtocol =
+                (SecurityProtocolType)((int)ServicePointManager.SecurityProtocol | Tls12Flag);
+
+            HttpWebRequest request =
+                (HttpWebRequest)WebRequest.Create(AppInfo.ReleasesApiUrl);
+            request.Method = "GET";
+            request.UserAgent = "GhostDesk/" + AppInfo.Version;
+            request.Accept = "application/vnd.github+json";
+            request.Timeout = 12000;
+            request.ReadWriteTimeout = 12000;
+            request.AllowAutoRedirect = true;
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                using (System.IO.Stream stream = response.GetResponseStream())
+                {
+                    if (stream == null)
+                    {
+                        throw new InvalidOperationException("GitHub 没有返回版本列表。");
+                    }
+
+                    using (System.IO.StreamReader reader = new System.IO.StreamReader(stream))
+                    {
+                        JavaScriptSerializer serializer = new JavaScriptSerializer();
+                        serializer.MaxJsonLength = 8 * 1024 * 1024;
+                        GitHubRelease[] releases =
+                            serializer.Deserialize<GitHubRelease[]>(reader.ReadToEnd());
+                        if (releases == null || releases.Length == 0)
+                        {
+                            throw new InvalidOperationException("GitHub 版本列表为空。");
+                        }
+
+                        List<ReleaseInfo> result = new List<ReleaseInfo>();
+                        foreach (GitHubRelease release in releases)
+                        {
+                            if (release == null)
+                            {
+                                continue;
+                            }
+
+                            ReleaseInfo info = new ReleaseInfo();
+                            info.TagName = release.tag_name;
+                            info.HtmlUrl = string.IsNullOrWhiteSpace(release.html_url)
+                                ? AppInfo.ReleasesUrl
+                                : release.html_url;
+                            info.Body = release.body;
+                            info.Assets = release.assets;
+                            info.Draft = release.draft;
+                            info.Prerelease = release.prerelease;
+                            result.Add(info);
+                        }
+
+                        return result;
+                    }
+                }
+            }
         }
 
         private static ReleaseInfo DownloadLatestRelease()
@@ -285,6 +492,10 @@ namespace GhostDesk
             public string Body { get; set; }
 
             public GitHubAsset[] Assets { get; set; }
+
+            public bool Draft { get; set; }
+
+            public bool Prerelease { get; set; }
         }
 
         private sealed class GitHubRelease
@@ -296,6 +507,10 @@ namespace GhostDesk
             public string body { get; set; }
 
             public GitHubAsset[] assets { get; set; }
+
+            public bool draft { get; set; }
+
+            public bool prerelease { get; set; }
         }
 
         private sealed class GitHubAsset

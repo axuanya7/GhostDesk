@@ -22,7 +22,10 @@ namespace GhostDesk
         private readonly List<RegionControl> _regions = new List<RegionControl>();
         private Canvas _root;
         private Canvas _dragLayer;
-        private DispatcherTimer _timer;
+        private Canvas _guideLayer;
+        private readonly List<Line> _guideLines = new List<Line>();
+        private Border _sizeBubble;
+        private TextBlock _sizeBubbleText;        private DispatcherTimer _timer;
         private HwndSource _source;
         private IntPtr _hwnd = IntPtr.Zero;
         private readonly HashSet<RegionControl> _interactionRegions =
@@ -139,6 +142,9 @@ namespace GhostDesk
             control.SetMoveCallbacks(BeginRegionMove, UpdateRegionMove, EndRegionMove);
             control.SetLayoutChangedCallback(RegionLayoutChanged);
             control.SetDockAnchorChangedCallback(DockAnchorChanged);
+            control.SetResizeSnapping(ApplyResizeGuides, delegate { ClearGuides(); });
+            control.SetMaterialEditor(OpenMaterialEditor);
+            control.ApplyMaterial(_config);
             control.InteractionChanged += RegionInteractionChanged;
             _regions.Add(control);
             _root.Children.Add(control);
@@ -246,7 +252,10 @@ namespace GhostDesk
 
             if (!IsSnapEnabled())
             {
-                region.ApplyPosition(desiredX, desiredY);
+                double guidedX = desiredX;
+                double guidedY = desiredY;
+                ApplyMoveGuides(region, ref guidedX, ref guidedY);
+                region.ApplyPosition(guidedX, guidedY);
                 ClampMovingGroupToWorkArea();
                 return;
             }
@@ -261,6 +270,11 @@ namespace GhostDesk
             Point snapped;
             RegionControl attach;
             SnapPrimaryToGroup(region, desired, out snapped, out attach);
+
+            double snapGuideX = snapped.X;
+            double snapGuideY = snapped.Y;
+            ApplyMoveGuides(region, ref snapGuideX, ref snapGuideY);
+            snapped = new Point(snapGuideX, snapGuideY);
 
             double deltaX = snapped.X - _lastGroupPrimaryPosition.X;
             double deltaY = snapped.Y - _lastGroupPrimaryPosition.Y;
@@ -282,6 +296,7 @@ namespace GhostDesk
                 _primaryMovingRegion = null;
                 _movingGroup.Clear();
                 PersistConfigChange();
+                ClearGuides();
                 ScheduleOverlayBottom();
             }
         }
@@ -657,6 +672,51 @@ namespace GhostDesk
             }
         }
 
+        /// <summary>打开单个分区的材质微调窗口，改动实时生效。</summary>
+        private void OpenMaterialEditor(RegionConfig model)
+        {
+            if (model == null)
+            {
+                return;
+            }
+
+            RegionControl target = null;
+            foreach (RegionControl region in _regions)
+            {
+                if (region != null && ReferenceEquals(region.Model, model))
+                {
+                    target = region;
+                    break;
+                }
+            }
+
+            MaterialWindow window = new MaterialWindow(
+                model,
+                _config,
+                delegate
+                {
+                    if (target != null)
+                    {
+                        target.ApplyMaterial(_config);
+                    }
+
+                    PersistConfigChange();
+                });
+            window.Topmost = true;
+            window.ShowDialog();
+        }
+
+        /// <summary>全局材质设置变化后，把所有分区重新刷一遍。</summary>
+        public void ApplyMaterialSettings()
+        {
+            foreach (RegionControl region in _regions)
+            {
+                if (region != null)
+                {
+                    region.ApplyMaterial(_config);
+                }
+            }
+        }
         /// <summary>分区贴边朝向被手动修改后，立即按新朝向贴边并落盘。</summary>
         private void DockAnchorChanged(RegionControl region)
         {
@@ -1854,12 +1914,23 @@ namespace GhostDesk
             _dragLayer.ClipToBounds = false;
             Panel.SetZIndex(_dragLayer, 1000000);
 
+            _guideLayer = new Canvas();
+            _guideLayer.HorizontalAlignment = HorizontalAlignment.Stretch;
+            _guideLayer.VerticalAlignment = VerticalAlignment.Stretch;
+            _guideLayer.Width = Width;
+            _guideLayer.Height = Height;
+            _guideLayer.IsHitTestVisible = false;
+            _guideLayer.Background = null;
+            _guideLayer.ClipToBounds = false;
+            Panel.SetZIndex(_guideLayer, 1000001);
+
             foreach (RegionConfig model in _config.Regions)
             {
                 AddRegion(model);
             }
 
             _root.Children.Add(_dragLayer);
+            _root.Children.Add(_guideLayer);
             ApplyAllDockLayouts();
         }
 
@@ -2252,6 +2323,284 @@ namespace GhostDesk
 
             _layerRestoreTimer.Stop();
             _layerRestoreTimer.Start();
+        }
+
+        /// <summary>是否显示对齐参考线（默认开启）。</summary>
+        private bool GuidesEnabled()
+        {
+            return _config == null || _config.EnableGuides != false;
+        }
+
+        private void ClearGuides()
+        {
+            if (_guideLayer == null)
+            {
+                return;
+            }
+
+            foreach (Line line in _guideLines)
+            {
+                _guideLayer.Children.Remove(line);
+            }
+
+            _guideLines.Clear();
+
+            if (_sizeBubble != null)
+            {
+                _guideLayer.Children.Remove(_sizeBubble);
+                _sizeBubble = null;
+                _sizeBubbleText = null;
+            }
+        }
+
+        private void DrawGuide(double? verticalX, double? horizontalY)
+        {
+            if (_guideLayer == null)
+            {
+                return;
+            }
+
+            foreach (Line line in _guideLines)
+            {
+                _guideLayer.Children.Remove(line);
+            }
+
+            _guideLines.Clear();
+
+            Brush brush = GlassTheme.CreateBrush(220, 139, 226, 255);
+            double width = GetWorkspaceWidth();
+            double height = GetWorkspaceHeight();
+
+            if (verticalX.HasValue)
+            {
+                Line v = new Line();
+                v.X1 = verticalX.Value;
+                v.X2 = verticalX.Value;
+                v.Y1 = 0;
+                v.Y2 = height;
+                v.Stroke = brush;
+                v.StrokeThickness = 1;
+                v.SnapsToDevicePixels = true;
+                _guideLayer.Children.Add(v);
+                _guideLines.Add(v);
+            }
+
+            if (horizontalY.HasValue)
+            {
+                Line h = new Line();
+                h.X1 = 0;
+                h.X2 = width;
+                h.Y1 = horizontalY.Value;
+                h.Y2 = horizontalY.Value;
+                h.Stroke = brush;
+                h.StrokeThickness = 1;
+                h.SnapsToDevicePixels = true;
+                _guideLayer.Children.Add(h);
+                _guideLines.Add(h);
+            }
+        }
+
+        private List<Rect> GetGuideTargetRects(RegionControl primary)
+        {
+            List<Rect> targets = new List<Rect>();
+            targets.Add(GetUsableRect());
+
+            foreach (RegionControl region in _regions)
+            {
+                if (region == null ||
+                    ReferenceEquals(region, primary) ||
+                    _movingGroup.Contains(region))
+                {
+                    continue;
+                }
+
+                Rect rect = GetRegionRect(region);
+                if (rect.Width > 1.0 && rect.Height > 1.0)
+                {
+                    targets.Add(rect);
+                }
+            }
+
+            return targets;
+        }
+
+        /// <summary>拖动时按其它分区/工作区的边与中线吸附，并画出参考线。</summary>
+        private void ApplyMoveGuides(RegionControl primary, ref double x, ref double y)
+        {
+            if (!GuidesEnabled() || primary == null)
+            {
+                ClearGuides();
+                return;
+            }
+
+            double width = primary.Model.Width;
+            double height = primary.Model.Height;
+            const double tolerance = 7.0;
+
+            List<Rect> targets = GetGuideTargetRects(primary);
+
+            double bestDx = 0.0;
+            double bestDxDistance = double.MaxValue;
+            double guideX = 0.0;
+            bool hasGuideX = false;
+
+            double[] myXs = { x, x + (width / 2.0), x + width };
+            foreach (Rect target in targets)
+            {
+                double[] targetXs =
+                {
+                    target.Left,
+                    target.Left + (target.Width / 2.0),
+                    target.Right
+                };
+
+                foreach (double myX in myXs)
+                {
+                    foreach (double targetX in targetXs)
+                    {
+                        double distance = Math.Abs(targetX - myX);
+                        if (distance <= tolerance && distance < bestDxDistance)
+                        {
+                            bestDxDistance = distance;
+                            bestDx = targetX - myX;
+                            guideX = targetX;
+                            hasGuideX = true;
+                        }
+                    }
+                }
+            }
+
+            double bestDy = 0.0;
+            double bestDyDistance = double.MaxValue;
+            double guideY = 0.0;
+            bool hasGuideY = false;
+
+            double[] myYs = { y, y + (height / 2.0), y + height };
+            foreach (Rect target in targets)
+            {
+                double[] targetYs =
+                {
+                    target.Top,
+                    target.Top + (target.Height / 2.0),
+                    target.Bottom
+                };
+
+                foreach (double myY in myYs)
+                {
+                    foreach (double targetY in targetYs)
+                    {
+                        double distance = Math.Abs(targetY - myY);
+                        if (distance <= tolerance && distance < bestDyDistance)
+                        {
+                            bestDyDistance = distance;
+                            bestDy = targetY - myY;
+                            guideY = targetY;
+                            hasGuideY = true;
+                        }
+                    }
+                }
+            }
+
+            if (hasGuideX)
+            {
+                x += bestDx;
+            }
+
+            if (hasGuideY)
+            {
+                y += bestDy;
+            }
+
+            DrawGuide(hasGuideX ? (double?)guideX : null, hasGuideY ? (double?)guideY : null);
+        }
+
+        /// <summary>缩放时吸附到其它分区的宽/高，并显示尺寸气泡。</summary>
+        private Size ApplyResizeGuides(RegionControl region, double width, double height)
+        {
+            if (!GuidesEnabled() || region == null)
+            {
+                ClearGuides();
+                return new Size(width, height);
+            }
+
+            const double tolerance = 7.0;
+            double bestWidth = double.NaN;
+            double bestWidthDistance = double.MaxValue;
+            double bestHeight = double.NaN;
+            double bestHeightDistance = double.MaxValue;
+
+            foreach (RegionControl other in _regions)
+            {
+                if (other == null || ReferenceEquals(other, region))
+                {
+                    continue;
+                }
+
+                Rect rect = GetRegionRect(other);
+                if (rect.Width <= 1.0 || rect.Height <= 1.0)
+                {
+                    continue;
+                }
+
+                double widthDistance = Math.Abs(rect.Width - width);
+                if (widthDistance <= tolerance && widthDistance < bestWidthDistance)
+                {
+                    bestWidthDistance = widthDistance;
+                    bestWidth = rect.Width;
+                }
+
+                double heightDistance = Math.Abs(rect.Height - height);
+                if (heightDistance <= tolerance && heightDistance < bestHeightDistance)
+                {
+                    bestHeightDistance = heightDistance;
+                    bestHeight = rect.Height;
+                }
+            }
+
+            if (!double.IsNaN(bestWidth))
+            {
+                width = bestWidth;
+            }
+
+            if (!double.IsNaN(bestHeight))
+            {
+                height = bestHeight;
+            }
+
+            ShowSizeBubble(region, width, height);
+            return new Size(width, height);
+        }
+
+        private void ShowSizeBubble(RegionControl region, double width, double height)
+        {
+            if (_guideLayer == null || region == null)
+            {
+                return;
+            }
+
+            if (_sizeBubble == null)
+            {
+                _sizeBubbleText = new TextBlock();
+                _sizeBubbleText.FontSize = 12;
+                _sizeBubbleText.Foreground = GlassTheme.TextPrimaryBrush;
+
+                _sizeBubble = new Border();
+                _sizeBubble.CornerRadius = new CornerRadius(6);
+                _sizeBubble.Padding = new Thickness(8, 3, 8, 3);
+                _sizeBubble.Background = GlassTheme.CreateBrush(220, 16, 20, 30);
+                _sizeBubble.BorderBrush = GlassTheme.CreateBrush(120, 139, 226, 255);
+                _sizeBubble.BorderThickness = new Thickness(1);
+                _sizeBubble.IsHitTestVisible = false;
+                _sizeBubble.Child = _sizeBubbleText;
+                _guideLayer.Children.Add(_sizeBubble);
+            }
+
+            _sizeBubbleText.Text = ((int)Math.Round(width)).ToString() +
+                " × " + ((int)Math.Round(height)).ToString();
+
+            Rect rect = GetRegionRect(region);
+            Canvas.SetLeft(_sizeBubble, rect.Left);
+            Canvas.SetTop(_sizeBubble, Math.Max(0.0, rect.Bottom + 6.0));
         }
 
         private void PositionBottom()

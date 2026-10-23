@@ -325,10 +325,17 @@ namespace GhostDesk
                 ? AppInfo.ReleasesUrl
                 : _pendingUpdateUrl;
 
+            string heading = update.ReleaseCount > 1
+                ? "发现新版本 " + update.Version + "（共 " + update.ReleaseCount.ToString() + " 个版本）"
+                : "发现新版本 " + update.Version;
+            string message =
+                (string.IsNullOrEmpty(update.NotesIntro) ? "" : update.NotesIntro + "\n") +
+                "下载完成后会关闭 GhostDesk，安装更新并重新打开。";
+
             UpdateNotification.ShowUpdateDownload(
                 "GhostDesk 更新",
-                "发现新版本 " + update.Version,
-                "下载完成后会关闭 GhostDesk，安装更新并重新打开。",
+                heading,
+                message,
                 update.ReleaseNotes,
                 "立即更新",
                 delegate(Action<int> progress, Action<string> completed)

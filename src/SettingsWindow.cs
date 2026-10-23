@@ -58,6 +58,11 @@ namespace GhostDesk
         private CheckBox _showHiddenFilesCheck;
         private bool _suppressVisibilityChange;
         private CheckBox _enableSnapCheck;
+        private CheckBox _enableGuidesCheck;
+
+        /// <summary>「!」提示图标（圆周感叹号）的矢量路径数据。</summary>
+        private const string NotesIconPath =
+            "M526.797519 107.535155c-214.532051 0-388.451126 173.917028-388.451126 388.488988 0 214.535121 173.919075 388.453173 388.451126 388.453173 214.57503 0 388.493082-173.918052 388.493082-388.453173C915.289578 281.452183 741.371526 107.535155 526.797519 107.535155zM491.338936 200.38075l70.958098 0c31.743982 0 56.938803 26.716478 55.075363 58.402131L602.973456 503.515768c-1.714038 29.15911-25.864064 51.9113-55.075363 51.9113l-42.166355 0c-29.212322 0-53.356208-22.751167-55.067176-51.9113l-14.398942-244.732887C434.401156 227.098251 459.595978 200.38075 491.338936 200.38075zM526.819009 791.629675c-50.069349 0-90.654696-40.573067-90.654696-90.641393 0-50.070372 40.585347-90.645486 90.654696-90.645486 50.067302 0 90.654696 40.575114 90.654696 90.645486C617.473705 751.054561 576.886311 791.629675 526.819009 791.629675z";
         private TextBox _edgeDockBandBox;
         private TextBox _safeTopBox;
         private TextBox _safeBottomBox;
@@ -67,6 +72,18 @@ namespace GhostDesk
         private Slider _safeBottomSlider;
         private Slider _safeSideSlider;
         private bool _dockSyncBusy;
+        private TextBox _matOpacityBox;
+        private Slider _matOpacitySlider;
+        private TextBox _matTintBox;
+        private Slider _matTintSlider;
+        private TextBox _matBorderBox;
+        private Slider _matBorderSlider;
+        private TextBox _matShadowBox;
+        private Slider _matShadowSlider;
+        private bool _matSyncBusy;
+
+        /// <summary>是否放出「分区材质」区块（材质功能验收后再置为 true）。</summary>
+        private static readonly bool MaterialUiEnabled = false;
         private CheckBox _showExtensionsCheck;
         private Slider _backupIntervalSlider;
         private TextBlock _backupIntervalValue;
@@ -341,10 +358,20 @@ namespace GhostDesk
             Grid.SetColumn(heading, 0);
             header.Children.Add(heading);
 
+            StackPanel headerActions = new StackPanel();
+            headerActions.Orientation = Orientation.Horizontal;
+            headerActions.VerticalAlignment = VerticalAlignment.Center;
+
+            Button notes = GlassTheme.CreateIconButton(CreateNotesIcon(), "使用说明与注意事项", ShowNotes);
+            notes.Margin = new Thickness(0, 0, 10, 0);
+            headerActions.Children.Add(notes);
+
             Button done = GlassTheme.CreateButton("完成", ButtonKind.Primary);
             done.Click += Done_Click;
-            Grid.SetColumn(done, 1);
-            header.Children.Add(done);
+            headerActions.Children.Add(done);
+
+            Grid.SetColumn(headerActions, 1);
+            header.Children.Add(headerActions);
             return header;
         }
 
@@ -575,6 +602,13 @@ namespace GhostDesk
             _enableSnapCheck.Unchecked += EnableSnap_Changed;
             tools.Children.Add(_enableSnapCheck);
 
+            _enableGuidesCheck = CreateCheckBox("对齐参考线");
+            _enableGuidesCheck.IsChecked = _config.EnableGuides != false;
+            _enableGuidesCheck.Margin = new Thickness(0, 0, 18, 8);
+            _enableGuidesCheck.Checked += EnableGuides_Changed;
+            _enableGuidesCheck.Unchecked += EnableGuides_Changed;
+            tools.Children.Add(_enableGuidesCheck);
+
             _showExtensionsCheck = CreateCheckBox("显示文件扩展名");
             _showExtensionsCheck.IsChecked = AreAllRegionsShowingExtensions();
             _showExtensionsCheck.Margin = new Thickness(0, 0, 0, 8);
@@ -657,6 +691,65 @@ namespace GhostDesk
             dockPanel.Children.Add(dockHint);
 
             page.Children.Add(dockPanel);
+
+            StackPanel materialPanel = new StackPanel();
+            materialPanel.Margin = new Thickness(0, 0, 0, 8);
+
+            TextBlock materialTitle = GlassTheme.CreateText("分区材质", 13, false);
+            materialTitle.FontWeight = FontWeights.SemiBold;
+            materialTitle.Margin = new Thickness(0, 0, 0, 4);
+            materialPanel.Children.Add(materialTitle);
+
+            WrapPanel presets = new WrapPanel();
+            presets.Margin = new Thickness(0, 0, 0, 6);
+            presets.Children.Add(CreateMaterialPresetButton("高透玻璃", AppConfig.MaterialGlass));
+            presets.Children.Add(CreateMaterialPresetButton("磨砂玻璃", AppConfig.MaterialFrosted));
+            presets.Children.Add(CreateMaterialPresetButton("纯色块", AppConfig.MaterialSolid));
+            materialPanel.Children.Add(presets);
+
+            Grid materialGrid = new Grid();
+            materialGrid.ColumnDefinitions.Add(
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            materialGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
+            materialGrid.ColumnDefinitions.Add(
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            materialGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            materialGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            int matOpacity = _config.MaterialOpacity ?? AppConfig.DefaultMaterialOpacity;
+            _matOpacityBox = CreateNumberBox(matOpacity, 0, 100, 4, Material_Changed);
+            _matOpacitySlider = CreateMaterialSlider(matOpacity, _matOpacityBox);
+            AddDockField(materialGrid, 0, 0, "背景不透明度", _matOpacitySlider, _matOpacityBox);
+
+            int matTint = _config.MaterialTint ?? AppConfig.DefaultMaterialTint;
+            _matTintBox = CreateNumberBox(matTint, 0, 100, 4, Material_Changed);
+            _matTintSlider = CreateMaterialSlider(matTint, _matTintBox);
+            AddDockField(materialGrid, 0, 2, "底色深浅", _matTintSlider, _matTintBox);
+
+            int matBorder = _config.MaterialBorder ?? AppConfig.DefaultMaterialBorder;
+            _matBorderBox = CreateNumberBox(matBorder, 0, 100, 4, Material_Changed);
+            _matBorderSlider = CreateMaterialSlider(matBorder, _matBorderBox);
+            AddDockField(materialGrid, 1, 0, "描边强度", _matBorderSlider, _matBorderBox);
+
+            int matShadow = _config.MaterialShadow ?? AppConfig.DefaultMaterialShadow;
+            _matShadowBox = CreateNumberBox(matShadow, 0, 100, 4, Material_Changed);
+            _matShadowSlider = CreateMaterialSlider(matShadow, _matShadowBox);
+            AddDockField(materialGrid, 1, 2, "阴影强度", _matShadowSlider, _matShadowBox);
+
+            materialPanel.Children.Add(materialGrid);
+
+            TextBlock materialHint = GlassTheme.CreateText(
+                "想单独调某个分区：右键该分区 →「外观材质...」。这里的数值是所有分区的默认值。",
+                12,
+                true);
+            materialHint.TextWrapping = TextWrapping.Wrap;
+            materialHint.Margin = new Thickness(0, 6, 0, 0);
+            materialPanel.Children.Add(materialHint);
+
+            if (MaterialUiEnabled)
+            {
+                page.Children.Add(materialPanel);
+            }
 
             TextBlock hint = GlassTheme.CreateText(
                 "拖到屏幕边缘始终会贴边。开启分区成组吸附后，相邻分区会按松开位置排序，并可成组拖动。扩展名设置会统一应用到所有分区。",
@@ -2842,6 +2935,153 @@ namespace GhostDesk
             grid.Children.Add(cell);
         }
 
+        private Button CreateMaterialPresetButton(string text, string preset)
+        {
+            Button button = GlassTheme.CreateButton(text, ButtonKind.Ghost);
+            button.Tag = preset;
+            button.Margin = new Thickness(0, 0, 8, 6);
+            button.Click += MaterialPreset_Click;
+            return button;
+        }
+
+        private Slider CreateMaterialSlider(double value, TextBox box)
+        {
+            Slider slider = new Slider();
+            slider.Minimum = 0;
+            slider.Maximum = 100;
+            slider.SmallChange = 1;
+            slider.LargeChange = 10;
+            slider.TickFrequency = 10;
+            slider.Width = 116;
+            slider.VerticalAlignment = VerticalAlignment.Center;
+            slider.Margin = new Thickness(0, 0, 10, 0);
+            slider.Tag = box;
+            slider.Value = Math.Max(0, Math.Min(100, value));
+            slider.ValueChanged += MaterialSlider_Changed;
+            return slider;
+        }
+
+        private void MaterialPreset_Click(object sender, RoutedEventArgs e)
+        {
+            Button button = sender as Button;
+            if (button == null)
+            {
+                return;
+            }
+
+            _config.MaterialPreset = ConfigStore.NormalizeMaterialPreset(button.Tag as string);
+            if (string.IsNullOrEmpty(_config.MaterialPreset))
+            {
+                _config.MaterialPreset = AppConfig.MaterialGlass;
+            }
+
+            ConfigStore.Save(_config);
+            if (_desktop != null)
+            {
+                _desktop.ApplyMaterialSettings();
+            }
+        }
+
+        private void MaterialSlider_Changed(
+            object sender,
+            RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_matSyncBusy)
+            {
+                return;
+            }
+
+            Slider slider = sender as Slider;
+            if (slider == null)
+            {
+                return;
+            }
+
+            _matSyncBusy = true;
+            try
+            {
+                int value = (int)Math.Round(e.NewValue);
+                TextBox box = slider.Tag as TextBox;
+                if (box != null)
+                {
+                    string text = value.ToString();
+                    if (!string.Equals(box.Text, text, StringComparison.Ordinal))
+                    {
+                        box.Text = text;
+                    }
+                }
+
+                ApplyMaterialValues();
+            }
+            finally
+            {
+                _matSyncBusy = false;
+            }
+        }
+
+        private void Material_Changed(object sender, RoutedEventArgs e)
+        {
+            SyncMaterialSlider(_matTintSlider, _matTintBox);
+            SyncMaterialSlider(_matBorderSlider, _matBorderBox);
+            SyncMaterialSlider(_matShadowSlider, _matShadowBox);
+            ApplyMaterialValues();
+        }
+
+        private void SyncMaterialSlider(Slider slider, TextBox box)
+        {
+            if (slider == null || box == null)
+            {
+                return;
+            }
+
+            int value = ParseDockValue(box, 0, 100);
+            if (Math.Abs(slider.Value - value) <= 0.01)
+            {
+                return;
+            }
+
+            _matSyncBusy = true;
+            try
+            {
+                slider.Value = value;
+            }
+            finally
+            {
+                _matSyncBusy = false;
+            }
+        }
+
+        private void ApplyMaterialValues()
+        {
+            if (_matOpacityBox == null ||
+                _matTintBox == null ||
+                _matBorderBox == null ||
+                _matShadowBox == null)
+            {
+                return;
+            }
+
+            _config.MaterialOpacity = ParseDockValue(_matOpacityBox, 0, 100);
+            _config.MaterialTint = ParseDockValue(_matTintBox, 0, 100);
+            _config.MaterialBorder = ParseDockValue(_matBorderBox, 0, 100);
+            _config.MaterialShadow = ParseDockValue(_matShadowBox, 0, 100);
+            ConfigStore.Save(_config);
+            if (_desktop != null)
+            {
+                _desktop.ApplyMaterialSettings();
+            }
+        }
+        private void EnableGuides_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_enableGuidesCheck == null)
+            {
+                return;
+            }
+
+            _config.EnableGuides = _enableGuidesCheck.IsChecked == true;
+            ConfigStore.Save(_config);
+        }
+
         private void EnableSnap_Changed(object sender, RoutedEventArgs e)
         {
             if (_enableSnapCheck == null)
@@ -2952,6 +3192,39 @@ namespace GhostDesk
             catch
             {
             }
+        }
+
+        /// <summary>把 SVG 路径数据变成可缩放的 WPF 图形。</summary>
+        private static Geometry CreateNotesIcon()
+        {
+            try
+            {
+                return Geometry.Parse(NotesIconPath);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>「!」说明弹窗：讲清楚收纳/删除/放回到底动了什么。</summary>
+        private void ShowNotes()
+        {
+            List<string> sections = new List<string>();
+            sections.Add("• 桌面上的文件 / 文件夹 / 快捷方式：拖进分区后只给原文件加「隐藏」属性，桌面图标消失，文件本身留在原处，不会移动。");
+            sections.Add("• 桌面以外的路径：GhostDesk 会先在这个文件所在的目录里建一个同名 .lnk 快捷方式，分区引用的是这份快捷方式，所以源文件的位置、名字都不会被改动。");
+            sections.Add("• 右键「删除（回收站）」：GhostDesk 代建的 .lnk 只会删掉这份快捷方式；直接引用的项目只移除分区记录，绝不会删除原始文件。");
+            sections.Add("• 「放回桌面 / 放回源路径」：只移除分区记录并恢复显示，文件位置和内容都不变。");
+            sections.Add("• 重命名：只改分区里显示的入口名（以及代建快捷方式的名字），不会修改源文件。");
+            sections.Add("• 贴边与朝向：右键分区 →「贴边方向」。固定在上/下/左/右只改变标题栏朝向，不会挪动分区；灵敏度与四周安全边距在「分区管理」页调整。");
+            sections.Add("• 配置与备份：配置保存在 %APPDATA%\\GhostDesk，可在「高级设置」里手动备份或恢复。");
+
+            InfoWindow window = new InfoWindow(
+                "分区收纳说明",
+                "下面几条说明可以帮你确认哪些操作不会动到原始文件。",
+                sections);
+            window.Owner = this;
+            window.ShowDialog();
         }
 
         private void Done_Click(object sender, RoutedEventArgs e)

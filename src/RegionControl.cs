@@ -73,6 +73,18 @@ namespace GhostDesk
 
         /// <summary>贴边朝向变化后的回调，由桌面窗口负责重新布局。</summary>
         private Action<RegionControl> _dockAnchorChangedCallback;
+        /// <summary>缩放时的尺寸吸附（返回吸附后的尺寸），由桌面层提供。</summary>
+        private Func<RegionControl, double, double, Size> _sizeSnapProvider;
+
+        /// <summary>缩放结束回调，用于清理参考线。</summary>
+        private Action<RegionControl> _resizeEndedCallback;
+
+        /// <summary>打开「外观材质」编辑窗口的回调。</summary>
+        private Action<RegionConfig> _materialEditor;
+
+        /// <summary>是否放出「外观材质」入口（材质功能验收后再置为 true）。</summary>
+        private static readonly bool MaterialUiEnabled = false;
+
         private string _collapseHoverTrigger;
         private TextBox _renameBox;
         private DesktopItemControl _internalDragItem;
@@ -144,6 +156,18 @@ namespace GhostDesk
         public void SetDockAnchorChangedCallback(Action<RegionControl> callback)
         {
             _dockAnchorChangedCallback = callback;
+        }
+
+        public void SetMaterialEditor(Action<RegionConfig> editor)
+        {
+            _materialEditor = editor;
+        }
+        public void SetResizeSnapping(
+            Func<RegionControl, double, double, Size> snapProvider,
+            Action<RegionControl> endedCallback)
+        {
+            _sizeSnapProvider = snapProvider;
+            _resizeEndedCallback = endedCallback;
         }
 
         public void RefreshDockLayout()
@@ -269,18 +293,10 @@ namespace GhostDesk
             Focusable = false;
             FocusVisualStyle = null;
             Opacity = 1.0;
-            Background = CreateGlassBrush();
-            BorderBrush = CreateGlassBorderBrush();
             BorderThickness = new Thickness(1);
             CornerRadius = new CornerRadius(16);
             Padding = new Thickness(7);
-            Effect = new DropShadowEffect
-            {
-                Color = Colors.Black,
-                BlurRadius = 24,
-                ShadowDepth = 0,
-                Opacity = 0.32
-            };
+            ApplyMaterial(null);
 
             BuildUi();
             UpdateDockChrome();
@@ -884,6 +900,13 @@ namespace GhostDesk
 
             menu.Items.Add(new Separator());
 
+            // 材质自定义尚未验收，先不放出入口
+            if (MaterialUiEnabled)
+            {
+                MenuItem material = new MenuItem { Header = "外观材质..." };
+                material.Click += Material_Click;
+                menu.Items.Add(material);
+            }
             MenuItem dock = new MenuItem { Header = "贴边方向" };
             AddDockAnchorOption(dock, "自动判断", RegionConfig.DockAnchorAuto);
             AddDockAnchorOption(dock, "固定在上边", RegionConfig.DockTop);
@@ -988,6 +1011,13 @@ namespace GhostDesk
             }
         }
 
+        private void Material_Click(object sender, RoutedEventArgs e)
+        {
+            if (_materialEditor != null)
+            {
+                _materialEditor(_model);
+            }
+        }
         private void AddDockAnchorOption(MenuItem parent, string header, string anchor)
         {
             MenuItem option = new MenuItem();
@@ -3045,6 +3075,13 @@ namespace GhostDesk
                 height = 72;
             }
 
+            if (_sizeSnapProvider != null)
+            {
+                Size snapped = _sizeSnapProvider(this, width, height);
+                width = Math.Max(96.0, snapped.Width);
+                height = Math.Max(72.0, snapped.Height);
+            }
+
             Width = width;
             Height = height;
             _model.Width = width;
@@ -3056,6 +3093,11 @@ namespace GhostDesk
 
         private void Resize_DragCompleted(object sender, DragCompletedEventArgs e)
         {
+            if (_resizeEndedCallback != null)
+            {
+                _resizeEndedCallback(this);
+            }
+
             SetInteraction(false);
             if (!IsMouseOver)
             {
@@ -3395,6 +3437,155 @@ namespace GhostDesk
             SolidColorBrush brush = new SolidColorBrush(color);
             brush.Freeze();
             return brush;
+        }
+
+        /// <summary>
+        /// 应用玻璃/磨砂/纯色材质：分区自身有覆盖值时用它，否则用全局默认。
+        /// 不透明度默认 25、底色 30、描边 60、阴影 32 时与旧版外观完全一致。
+        /// </summary>
+        public void ApplyMaterial(AppConfig config)
+        {
+            string preset = ConfigStore.NormalizeMaterialPreset(_model.MaterialPreset);
+            if (string.IsNullOrEmpty(preset) && config != null)
+            {
+                preset = ConfigStore.NormalizeMaterialPreset(config.MaterialPreset);
+            }
+
+            if (string.IsNullOrEmpty(preset))
+            {
+                preset = AppConfig.MaterialGlass;
+            }
+
+            int opacity = ResolveMaterialValue(
+                _model.MaterialOpacity,
+                config == null ? null : config.MaterialOpacity,
+                AppConfig.DefaultMaterialOpacity);
+            int tint = ResolveMaterialValue(
+                _model.MaterialTint,
+                config == null ? null : config.MaterialTint,
+                AppConfig.DefaultMaterialTint);
+            int border = ResolveMaterialValue(
+                _model.MaterialBorder,
+                config == null ? null : config.MaterialBorder,
+                AppConfig.DefaultMaterialBorder);
+            int shadow = ResolveMaterialValue(
+                _model.MaterialShadow,
+                config == null ? null : config.MaterialShadow,
+                AppConfig.DefaultMaterialShadow);
+
+            Background = CreateMaterialBackground(preset, opacity, tint);
+            BorderBrush = CreateMaterialBorderBrush(preset, border);
+            Effect = CreateMaterialShadow(shadow);
+        }
+
+        private static int ResolveMaterialValue(int? regionValue, int? globalValue, int fallback)
+        {
+            int value = regionValue.HasValue
+                ? regionValue.Value
+                : (globalValue.HasValue ? globalValue.Value : fallback);
+            return Math.Max(0, Math.Min(100, value));
+        }
+
+        private static byte ClampByte(double value)
+        {
+            if (value <= 0.0)
+            {
+                return 0;
+            }
+
+            if (value >= 255.0)
+            {
+                return 255;
+            }
+
+            return (byte)Math.Round(value);
+        }
+
+        /// <summary>底色深浅：tint 0 更亮、100 更深，30 为原有效果。</summary>
+        private static double MaterialDarkFactor(int tint)
+        {
+            return 1.0 + ((30.0 - tint) / 100.0 * 0.8);
+        }
+
+        private static Brush CreateMaterialBackground(string preset, int opacity, int tint)
+        {
+            double dark = MaterialDarkFactor(tint);
+
+            if (string.Equals(preset, AppConfig.MaterialSolid, StringComparison.Ordinal))
+            {
+                double level = 70.0 * dark;
+                byte alpha = ClampByte(150.0 + (opacity / 100.0 * 105.0));
+                return CreateBrush(Color.FromArgb(
+                    alpha,
+                    ClampByte(level),
+                    ClampByte(level + 4.0),
+                    ClampByte(level + 12.0)));
+            }
+
+            bool frosted = string.Equals(preset, AppConfig.MaterialFrosted, StringComparison.Ordinal);
+            double scale = opacity / (double)AppConfig.DefaultMaterialOpacity;
+            double highlight = frosted ? 118.0 : 72.0;
+            double middle = frosted ? 96.0 : 28.0;
+            double bottom = frosted ? 108.0 : 58.0;
+
+            LinearGradientBrush brush = new LinearGradientBrush();
+            brush.StartPoint = new Point(0, 0);
+            brush.EndPoint = new Point(1, 1);
+            brush.GradientStops.Add(new GradientStop(
+                Color.FromArgb(ClampByte(highlight * scale), 255, 255, 255),
+                0.0));
+            brush.GradientStops.Add(new GradientStop(
+                Color.FromArgb(
+                    ClampByte(middle * scale),
+                    ClampByte(24 * dark),
+                    ClampByte(32 * dark),
+                    ClampByte(48 * dark)),
+                0.48));
+            brush.GradientStops.Add(new GradientStop(
+                Color.FromArgb(
+                    ClampByte(bottom * scale),
+                    ClampByte(112 * dark),
+                    ClampByte(160 * dark),
+                    ClampByte(222 * dark)),
+                1.0));
+            brush.Freeze();
+            return brush;
+        }
+
+        private static Brush CreateMaterialBorderBrush(string preset, int border)
+        {
+            if (string.Equals(preset, AppConfig.MaterialSolid, StringComparison.Ordinal))
+            {
+                byte alpha = ClampByte(border / 100.0 * 255.0);
+                return CreateBrush(Color.FromArgb(alpha, 255, 255, 255));
+            }
+
+            double scale = border / (double)AppConfig.DefaultMaterialBorder;
+            LinearGradientBrush brush = new LinearGradientBrush();
+            brush.StartPoint = new Point(0, 0);
+            brush.EndPoint = new Point(1, 1);
+            brush.GradientStops.Add(new GradientStop(
+                Color.FromArgb(ClampByte(190 * scale), 255, 255, 255),
+                0.0));
+            brush.GradientStops.Add(new GradientStop(
+                Color.FromArgb(ClampByte(72 * scale), 255, 255, 255),
+                0.5));
+            brush.GradientStops.Add(new GradientStop(
+                Color.FromArgb(ClampByte(150 * scale), 190, 226, 255),
+                1.0));
+            brush.Freeze();
+            return brush;
+        }
+
+        private static Effect CreateMaterialShadow(int shadow)
+        {
+            return new DropShadowEffect
+            {
+                Color = Colors.Black,
+                BlurRadius = 24,
+                ShadowDepth = 0,
+                Opacity = Math.Max(0.0, Math.Min(1.0, shadow / 100.0))
+            };
         }
 
         private static LinearGradientBrush CreateGlassBrush()

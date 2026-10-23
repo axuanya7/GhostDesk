@@ -136,6 +136,26 @@ namespace GhostDesk
         [DataMember]
         public string TitleSide { get; set; }
 
+        /// <summary>材质预设覆盖：空=跟随全局，glass/frosted/solid 见 AppConfig.Material* 常量。</summary>
+        [DataMember]
+        public string MaterialPreset { get; set; }
+
+        /// <summary>背景不透明度覆盖（0~100），空=跟随全局。</summary>
+        [DataMember]
+        public int? MaterialOpacity { get; set; }
+
+        /// <summary>底色深浅覆盖（0~100，越小越亮），空=跟随全局。</summary>
+        [DataMember]
+        public int? MaterialTint { get; set; }
+
+        /// <summary>描边强度覆盖（0~100），空=跟随全局。</summary>
+        [DataMember]
+        public int? MaterialBorder { get; set; }
+
+        /// <summary>阴影强度覆盖（0~100），空=跟随全局。</summary>
+        [DataMember]
+        public int? MaterialShadow { get; set; }
+
         [DataMember]
         public int DockOrder { get; set; }
 
@@ -230,6 +250,39 @@ namespace GhostDesk
         /// <summary>拖到屏幕边缘时是否自动贴边（关闭后分区可以自由摆放）。</summary>
         [DataMember]
         public bool? EnableEdgeDock { get; set; }
+
+        /// <summary>拖动/缩放分区时是否显示对齐参考线。</summary>
+        [DataMember]
+        public bool? EnableGuides { get; set; }
+
+        /// <summary>全局材质预设：glass（高透）/ frosted（磨砂）/ solid（纯色块）。</summary>
+        [DataMember]
+        public string MaterialPreset { get; set; }
+
+        /// <summary>全局背景不透明度（0~100）。</summary>
+        [DataMember]
+        public int? MaterialOpacity { get; set; }
+
+        /// <summary>全局底色深浅（0~100，越小越亮）。</summary>
+        [DataMember]
+        public int? MaterialTint { get; set; }
+
+        /// <summary>全局描边强度（0~100）。</summary>
+        [DataMember]
+        public int? MaterialBorder { get; set; }
+
+        /// <summary>全局阴影强度（0~100）。</summary>
+        [DataMember]
+        public int? MaterialShadow { get; set; }
+
+        public const string MaterialGlass = "glass";
+        public const string MaterialFrosted = "frosted";
+        public const string MaterialSolid = "solid";
+
+        public const int DefaultMaterialOpacity = 25;
+        public const int DefaultMaterialTint = 30;
+        public const int DefaultMaterialBorder = 60;
+        public const int DefaultMaterialShadow = 32;
 
         /// <summary>贴边判定的边缘带宽度（像素），越大越容易贴边。</summary>
         [DataMember]
@@ -547,6 +600,12 @@ namespace GhostDesk
                 sb.AppendLine("  \"SkippedVersion\": \"" + Escape(config.SkippedVersion) + "\",");
                 sb.AppendLine("  \"EnableSnap\": " + (config.EnableSnap == true ? "true" : "false") + ",");
                 sb.AppendLine("  \"EnableEdgeDock\": " + (config.EnableEdgeDock != false ? "true" : "false") + ",");
+                sb.AppendLine("  \"EnableGuides\": " + (config.EnableGuides != false ? "true" : "false") + ",");
+                sb.AppendLine("  \"MaterialPreset\": \"" + Escape(config.MaterialPreset) + "\",");
+                sb.AppendLine("  \"MaterialOpacity\": " + FormatInt(config.MaterialOpacity, AppConfig.DefaultMaterialOpacity) + ",");
+                sb.AppendLine("  \"MaterialTint\": " + FormatInt(config.MaterialTint, AppConfig.DefaultMaterialTint) + ",");
+                sb.AppendLine("  \"MaterialBorder\": " + FormatInt(config.MaterialBorder, AppConfig.DefaultMaterialBorder) + ",");
+                sb.AppendLine("  \"MaterialShadow\": " + FormatInt(config.MaterialShadow, AppConfig.DefaultMaterialShadow) + ",");
                 sb.AppendLine("  \"EdgeDockBand\": " + config.GetEdgeDockBand().ToString("0", CultureInfo.InvariantCulture) + ",");
                 sb.AppendLine("  \"SafeInsetTop\": " + FormatInset(config.SafeInsetTop) + ",");
                 sb.AppendLine("  \"SafeInsetBottom\": " + FormatInset(config.SafeInsetBottom) + ",");
@@ -570,6 +629,11 @@ namespace GhostDesk
                     sb.AppendLine("      \"DockEdge\": \"" + Escape(region.DockEdge) + "\",");
                     sb.AppendLine("      \"DockAnchor\": \"" + Escape(region.DockAnchor) + "\",");
                     sb.AppendLine("      \"TitleSide\": \"" + Escape(region.TitleSide) + "\",");
+                    sb.AppendLine("      \"MaterialPreset\": \"" + Escape(region.MaterialPreset) + "\",");
+                    sb.AppendLine("      \"MaterialOpacity\": " + FormatNullableInt(region.MaterialOpacity) + ",");
+                    sb.AppendLine("      \"MaterialTint\": " + FormatNullableInt(region.MaterialTint) + ",");
+                    sb.AppendLine("      \"MaterialBorder\": " + FormatNullableInt(region.MaterialBorder) + ",");
+                    sb.AppendLine("      \"MaterialShadow\": " + FormatNullableInt(region.MaterialShadow) + ",");
                     sb.AppendLine("      \"DockOrder\": " + region.DockOrder.ToString(CultureInfo.InvariantCulture) + ",");
                     sb.AppendLine("      \"ShowExtensions\": \"" + Escape(region.ShowExtensions) + "\",");
                     sb.AppendLine("      \"Items\": [");
@@ -1176,6 +1240,31 @@ namespace GhostDesk
             {
                 config.EnableEdgeDock = true;
             }
+            if (!config.EnableGuides.HasValue)
+            {
+                config.EnableGuides = true;
+            }
+            config.MaterialPreset = NormalizeMaterialPreset(config.MaterialPreset);
+            if (string.IsNullOrEmpty(config.MaterialPreset))
+            {
+                config.MaterialPreset = AppConfig.MaterialGlass;
+            }
+            if (!config.MaterialOpacity.HasValue)
+            {
+                config.MaterialOpacity = AppConfig.DefaultMaterialOpacity;
+            }
+            if (!config.MaterialTint.HasValue)
+            {
+                config.MaterialTint = AppConfig.DefaultMaterialTint;
+            }
+            if (!config.MaterialBorder.HasValue)
+            {
+                config.MaterialBorder = AppConfig.DefaultMaterialBorder;
+            }
+            if (!config.MaterialShadow.HasValue)
+            {
+                config.MaterialShadow = AppConfig.DefaultMaterialShadow;
+            }
             if (!config.EdgeDockBand.HasValue)
             {
                 config.EdgeDockBand = AppConfig.DefaultEdgeDockBand;
@@ -1251,6 +1340,11 @@ namespace GhostDesk
                 region.DockEdge = NormalizeDockEdge(region.DockEdge);
                 region.DockAnchor = NormalizeDockAnchor(region.DockAnchor);
                 region.TitleSide = NormalizeTitleSide(region.TitleSide);
+                region.MaterialPreset = NormalizeMaterialPreset(region.MaterialPreset);
+                region.MaterialOpacity = ClampNullable(region.MaterialOpacity);
+                region.MaterialTint = ClampNullable(region.MaterialTint);
+                region.MaterialBorder = ClampNullable(region.MaterialBorder);
+                region.MaterialShadow = ClampNullable(region.MaterialShadow);
                 // 旧版本把「固定四边」写在 DockAnchor 里，这里迁移成标题朝向，位置交还给自动贴边
                 if (region.DockAnchor != RegionConfig.DockAnchorFree &&
                     region.DockAnchor != RegionConfig.DockAnchorAuto)
@@ -1706,6 +1800,58 @@ namespace GhostDesk
             }
 
             return "";
+        }
+
+        /// <summary>材质预设允许 glass / frosted / solid，其它值一律视为空（跟随全局）。</summary>
+        internal static string NormalizeMaterialPreset(string preset)
+        {
+            if (string.IsNullOrWhiteSpace(preset))
+            {
+                return "";
+            }
+
+            string value = preset.Trim().ToLowerInvariant();
+            if (value == AppConfig.MaterialGlass ||
+                value == AppConfig.MaterialFrosted ||
+                value == AppConfig.MaterialSolid)
+            {
+                return value;
+            }
+
+            return "";
+        }
+
+        internal static int? ClampNullable(int? value)
+        {
+            if (!value.HasValue)
+            {
+                return null;
+            }
+
+            return Math.Max(0, Math.Min(100, value.Value));
+        }
+
+        internal static int ClampPercent(int? value, int fallback)
+        {
+            if (!value.HasValue)
+            {
+                return fallback;
+            }
+
+            return Math.Max(0, Math.Min(100, value.Value));
+        }
+
+        private static string FormatInt(int? value, int fallback)
+        {
+            int result = value.HasValue ? Math.Max(0, Math.Min(100, value.Value)) : fallback;
+            return result.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatNullableInt(int? value)
+        {
+            return value.HasValue
+                ? Math.Max(0, Math.Min(100, value.Value)).ToString(CultureInfo.InvariantCulture)
+                : "null";
         }
 
         private static string FormatInset(int? value)

@@ -4,7 +4,7 @@ namespace GhostDesk
 {
     internal static class AppInfo
     {
-        public const string Version = "1.4.0";
+        public const string Version = "1.4.1";
         public const string GitHubOwner = "axuanya7";
         public const string GitHubRepo = "GhostDesk";
 
@@ -16,5 +16,9 @@ namespace GhostDesk
 
         public const string LatestReleaseApiUrl =
             "https://api.github.com/repos/" + GitHubOwner + "/" + GitHubRepo + "/releases/latest";
+
+        /// <summary>版本列表接口：一次取回多个版本，用来汇总"从你当前版本之后的所有更新"。</summary>
+        public const string ReleasesApiUrl =
+            "https://api.github.com/repos/" + GitHubOwner + "/" + GitHubRepo + "/releases?per_page=30";
     }
 }

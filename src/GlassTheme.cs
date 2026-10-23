@@ -364,6 +364,29 @@ namespace GhostDesk
             return button;
         }
 
+        /// <summary>用矢量图形创建图标按钮（内容为 Path，而不是文字）。</summary>
+        public static Button CreateIconButton(Geometry icon, string tooltip, Action click)
+        {
+            Button button = CreateIconButton("", tooltip, click);
+            if (icon == null)
+            {
+                button.Content = "!";
+                return button;
+            }
+
+            System.Windows.Shapes.Path glyph = new System.Windows.Shapes.Path();
+            glyph.Data = icon;
+            glyph.Fill = CreateBrush(236, 139, 226, 255);
+            glyph.Stroke = null;
+            glyph.Stretch = Stretch.Uniform;
+            glyph.Width = 19;
+            glyph.Height = 19;
+            glyph.HorizontalAlignment = HorizontalAlignment.Center;
+            glyph.VerticalAlignment = VerticalAlignment.Center;
+            button.Content = glyph;
+            return button;
+        }
+
         public static Button CreateIconButton(string glyph, string tooltip, Action click)
         {
             Button button = new Button();
