@@ -4,7 +4,7 @@ namespace GhostDesk
 {
     internal static class AppInfo
     {
-        public const string Version = "1.4.4";
+        public const string Version = "1.4.5";
         public const string GitHubOwner = "axuanya7";
         public const string GitHubRepo = "GhostDesk";
 

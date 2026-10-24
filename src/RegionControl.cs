@@ -68,6 +68,14 @@ namespace GhostDesk
         private double _expandedWidth;
         private double _expandedHeight;
         private bool _autoExpanded;
+        /// <summary>最近一次自动展开的时间：展开瞬间 WPF 会误报 MouseLeave，用它挡掉。</summary>
+        private DateTime _lastAutoExpandUtc = DateTime.MinValue;
+
+        /// <summary>自动展开后轮询真实光标位置，只有真的离开分区才收起。</summary>
+        private DispatcherTimer _collapseWatch;
+
+        /// <summary>连续几次检测到光标在分区外（约 150ms 一次）。</summary>
+        private int _outsideTicks;
         private bool _pinnedExpanded;
         private Action<RegionControl> _layoutChangedCallback;
 
@@ -862,7 +870,7 @@ namespace GhostDesk
                 {
                     if (_autoExpanded &&
                         !_pinnedExpanded &&
-                        !IsMouseOver &&
+                        !IsCursorInsideRegion() &&
                         !HasOpenContextMenu)
                     {
                         CollapseTemporary();
@@ -1448,10 +1456,6 @@ namespace GhostDesk
 
         private void CollapseButton_MouseLeave(object sender, MouseEventArgs e)
         {
-            if (_autoExpanded && !IsMouseOver)
-            {
-                CollapseTemporary();
-            }
         }
 
         private void Header_MouseEnter(object sender, MouseEventArgs e)
@@ -1485,14 +1489,17 @@ namespace GhostDesk
             if (collapsed)
             {
                 _autoExpanded = false;
+                StopCollapseWatch();
                 UpdateDockChrome();
                 ApplyCollapsedDimensions();
             }
             else
             {
+                _lastAutoExpandUtc = DateTime.UtcNow;
                 UpdateDockChrome();
                 Width = _expandedWidth;
                 Height = _expandedHeight;
+                StartCollapseWatch();
             }
 
             RefreshItems();
@@ -1766,8 +1773,117 @@ namespace GhostDesk
             }
         }
 
+        /// <summary>开始轮询光标：自动展开后靠它判断是否真的离开分区。</summary>
+        private void StartCollapseWatch()
+        {
+            if (_collapseWatch == null)
+            {
+                _collapseWatch = new DispatcherTimer();
+                _collapseWatch.Interval = TimeSpan.FromMilliseconds(150);
+                _collapseWatch.Tick += CollapseWatch_Tick;
+            }
+
+            _outsideTicks = 0;
+            _collapseWatch.Start();
+        }
+
+        private void StopCollapseWatch()
+        {
+            _outsideTicks = 0;
+            if (_collapseWatch != null)
+            {
+                _collapseWatch.Stop();
+            }
+        }
+
+        private void CollapseWatch_Tick(object sender, EventArgs e)
+        {
+            if (!_autoExpanded)
+            {
+                StopCollapseWatch();
+                return;
+            }
+
+            // 抽屉/菜单/拖动期间只是暂停判断，不停止轮询
+            if (_pinnedExpanded ||
+                _interactionActive ||
+                HasOpenContextMenu ||
+                _moving ||
+                _resizeGrip.IsDragging)
+            {
+                _outsideTicks = 0;
+                return;
+            }
+
+            if ((DateTime.UtcNow - _lastAutoExpandUtc).TotalMilliseconds < 300.0)
+            {
+                _outsideTicks = 0;
+                return;
+            }
+
+            if (IsCursorInsideRegion())
+            {
+                _outsideTicks = 0;
+                return;
+            }
+
+            _outsideTicks++;
+            if (_outsideTicks >= 2)
+            {
+                StopCollapseWatch();
+                CollapseTemporary();
+            }
+        }
+
+        /// <summary>用真实光标屏幕坐标判断是否在分区内，不依赖 WPF 的鼠标事件。</summary>
+        private bool IsCursorInsideRegion()
+        {
+            try
+            {
+                System.Drawing.Point cursor = System.Windows.Forms.Cursor.Position;
+                Point topLeft = PointToScreen(new Point(0, 0));
+                Point bottomRight = PointToScreen(new Point(ActualWidth, ActualHeight));
+                return cursor.X >= topLeft.X &&
+                    cursor.Y >= topLeft.Y &&
+                    cursor.X <= bottomRight.X &&
+                    cursor.Y <= bottomRight.Y;
+            }
+            catch
+            {
+                return IsMouseOver;
+            }
+        }
+
+        /// <summary>诊断用：GHOSTDESK_DEBUG_COLLAPSE=1 时把收起原因写进临时日志。</summary>
+        private void LogCollapse(string reason)
+        {
+            try
+            {
+                if (!string.Equals(
+                    Environment.GetEnvironmentVariable("GHOSTDESK_DEBUG_COLLAPSE"),
+                    "1",
+                    StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                string path = System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(),
+                    "ghostdesk-collapse.log");
+                System.IO.File.AppendAllText(
+                    path,
+                    DateTime.Now.ToString("HH:mm:ss.fff") + "  " + _model.Name + "  " + reason +
+                    "  cursor=" + System.Windows.Forms.Cursor.Position.X + "," +
+                    System.Windows.Forms.Cursor.Position.Y + Environment.NewLine);
+            }
+            catch
+            {
+            }
+        }
+
         private void CollapseTemporary()
         {
+            LogCollapse("auto-collapse");
             _autoExpanded = false;
             _pinnedExpanded = false;
             SetCollapsed(true);
@@ -3128,13 +3244,6 @@ namespace GhostDesk
                 SetHover(false);
             }
 
-            if (_autoExpanded &&
-                !_pinnedExpanded &&
-                !_interactionActive &&
-                !HasOpenContextMenu)
-            {
-                CollapseTemporary();
-            }
         }
 
         private void Child_MouseEnter(object sender, MouseEventArgs e)
@@ -3473,7 +3582,8 @@ namespace GhostDesk
                 config == null ? null : config.MaterialShadow,
                 AppConfig.DefaultMaterialShadow);
 
-            Background = CreateMaterialBackground(preset, opacity, tint);
+            // 背景至少留 5%：完全透明会让分区看起来只剩标题栏，也容易点穿到桌面
+            Background = CreateMaterialBackground(preset, Math.Max(5, opacity), tint);
             BorderBrush = CreateMaterialBorderBrush(preset, border);
             Effect = CreateMaterialShadow(shadow);
         }
@@ -3507,6 +3617,15 @@ namespace GhostDesk
             return 1.0 + ((30.0 - tint) / 100.0 * 0.8);
         }
 
+        /// <summary>
+        /// 渲染用 alpha 下限：分层窗口里 alpha=0 的像素会被系统判定为"点不中"，
+        /// 右键会穿透到桌面菜单，所以最透明也要留 1。
+        /// </summary>
+        private static byte MaterialAlpha(double value)
+        {
+            return ClampByte(Math.Max(1.0, value));
+        }
+
         private static Brush CreateMaterialBackground(string preset, int opacity, int tint)
         {
             double dark = MaterialDarkFactor(tint);
@@ -3514,7 +3633,7 @@ namespace GhostDesk
             if (string.Equals(preset, AppConfig.MaterialSolid, StringComparison.Ordinal))
             {
                 double level = 70.0 * dark;
-                byte alpha = ClampByte(150.0 + (opacity / 100.0 * 105.0));
+                byte alpha = MaterialAlpha(150.0 + (opacity / 100.0 * 105.0));
                 return CreateBrush(Color.FromArgb(
                     alpha,
                     ClampByte(level),
@@ -3532,18 +3651,18 @@ namespace GhostDesk
             brush.StartPoint = new Point(0, 0);
             brush.EndPoint = new Point(1, 1);
             brush.GradientStops.Add(new GradientStop(
-                Color.FromArgb(ClampByte(highlight * scale), 255, 255, 255),
+                Color.FromArgb(MaterialAlpha(highlight * scale), 255, 255, 255),
                 0.0));
             brush.GradientStops.Add(new GradientStop(
                 Color.FromArgb(
-                    ClampByte(middle * scale),
+                    MaterialAlpha(middle * scale),
                     ClampByte(24 * dark),
                     ClampByte(32 * dark),
                     ClampByte(48 * dark)),
                 0.48));
             brush.GradientStops.Add(new GradientStop(
                 Color.FromArgb(
-                    ClampByte(bottom * scale),
+                    MaterialAlpha(bottom * scale),
                     ClampByte(112 * dark),
                     ClampByte(160 * dark),
                     ClampByte(222 * dark)),

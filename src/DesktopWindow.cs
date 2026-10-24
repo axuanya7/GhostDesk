@@ -108,13 +108,13 @@ namespace GhostDesk
             // 只有在分区上按下左键时才把覆盖层抬到其它窗口之上
             PreviewMouseDown += delegate(object sender, MouseButtonEventArgs e)
             {
-                if (e.ChangedButton != MouseButton.Left)
+                if (e.ChangedButton != MouseButton.Left && e.ChangedButton != MouseButton.Right)
                 {
                     return;
                 }
 
                 RaiseOverlayAboveWindows();
-                _raiseHoldUntilUtc = DateTime.UtcNow.AddSeconds(1.2);
+                _raiseHoldUntilUtc = DateTime.UtcNow.AddSeconds(e.ChangedButton == MouseButton.Right ? 3.5 : 1.2);
                 ScheduleOverlayBottom();
             };
 
