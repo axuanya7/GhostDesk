@@ -1136,6 +1136,21 @@ namespace GhostDesk
             }
         }
 
+        /// <summary>
+        /// 只把分区夹进工作区，不做贴边对齐、也不重排。
+        /// 启动时用这个，保证"上次保存的布局原样还原"，不重叠的布局一个像素都不动。
+        /// </summary>
+        private void ClampAllRegionsIntoWorkspace()
+        {
+            foreach (RegionControl region in _regions)
+            {
+                if (region != null)
+                {
+                    ClampRegionIntoWorkspace(region);
+                }
+            }
+        }
+
         private void ClampRegionIntoWorkspace(RegionControl region)
         {
             if (region == null)
@@ -1829,9 +1844,16 @@ namespace GhostDesk
             }
         }
 
-        private void RefreshDesktopLayout()
+        private void RefreshDesktopLayout(bool alignDockedRegions = true)
         {
             ApplyDesktopAreaBounds();
+
+            if (!alignDockedRegions)
+            {
+                ClampAllRegionsIntoWorkspace();
+                return;
+            }
+
             ApplyAllDockLayouts();
 
             foreach (RegionControl region in _regions)
@@ -1879,7 +1901,7 @@ namespace GhostDesk
 
             _root.Children.Add(_dragLayer);
             _root.Children.Add(_guideLayer);
-            ApplyAllDockLayouts();
+            ClampAllRegionsIntoWorkspace();
         }
 
         private void DesktopWindow_SourceInitialized(object sender, EventArgs e)
@@ -1972,7 +1994,7 @@ namespace GhostDesk
             {
                 Dispatcher.BeginInvoke(
                     DispatcherPriority.Background,
-                    new Action(RefreshDesktopLayout));
+                    new Action(delegate { RefreshDesktopLayout(); }));
             }
 
             if (msg != NativeMethods.WM_NCHITTEST)
@@ -2130,7 +2152,7 @@ namespace GhostDesk
         {
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
             {
-                RefreshDesktopLayout();
+                RefreshDesktopLayout(false);
                 PositionBottom();
 
                 UpdateInputTransparency();

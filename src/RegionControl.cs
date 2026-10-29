@@ -307,7 +307,14 @@ namespace GhostDesk
             ApplyMaterial(null);
 
             BuildUi();
+
+            // 启动时按保存的收纳状态还原
+            _collapsed = model.Collapsed;
             UpdateDockChrome();
+            if (_collapsed)
+            {
+                ApplyCollapsedDimensions();
+            }
         }
 
         public void SetCollapseHoverTrigger(string value)
@@ -1426,22 +1433,37 @@ namespace GhostDesk
 
         private void CollapseButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_collapsed)
+            // 以「已保存的收纳状态」为准取反：
+            // 鼠标悬停可能让分区临时展开，按瞬时状态判断会把偏好存反，重启就复原了。
+            bool collapseNow = !_model.Collapsed;
+            _autoExpanded = false;
+            _pinnedExpanded = !collapseNow;
+            if (!collapseNow)
             {
-                _autoExpanded = false;
-                _pinnedExpanded = true;
-                SetCollapsed(false);
+                _lastAutoExpandUtc = DateTime.UtcNow;
+                StopCollapseWatch();
             }
-            else if (_autoExpanded)
+
+            SetCollapsedPreference(collapseNow);
+        }
+
+        /// <summary>收起/展开并把结果记为分区偏好（会写进配置）。</summary>
+        private void SetCollapsedPreference(bool collapsed)
+        {
+            bool preferenceChanged = _model.Collapsed != collapsed;
+            if (preferenceChanged)
             {
-                _autoExpanded = false;
-                _pinnedExpanded = true;
+                _model.Collapsed = collapsed;
             }
-            else
+
+            if (_collapsed != collapsed)
             {
-                _autoExpanded = false;
-                _pinnedExpanded = false;
-                SetCollapsed(true);
+                SetCollapsed(collapsed);
+            }
+
+            if (preferenceChanged)
+            {
+                NotifyChanged();
             }
         }
 

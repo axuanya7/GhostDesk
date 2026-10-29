@@ -135,6 +135,9 @@ namespace GhostDesk
         /// <summary>标题朝向：空=跟随贴边方向，其余 top/bottom/left/right 只改标题栏方向，不改位置。</summary>
         [DataMember]
         public string TitleSide { get; set; }
+        /// <summary>是否处于收纳（收起）状态，重启后按这个还原。</summary>
+        [DataMember]
+        public bool Collapsed { get; set; }
 
         /// <summary>材质预设覆盖：空=跟随全局，glass/frosted/solid 见 AppConfig.Material* 常量。</summary>
         [DataMember]
@@ -629,6 +632,7 @@ namespace GhostDesk
                     sb.AppendLine("      \"DockEdge\": \"" + Escape(region.DockEdge) + "\",");
                     sb.AppendLine("      \"DockAnchor\": \"" + Escape(region.DockAnchor) + "\",");
                     sb.AppendLine("      \"TitleSide\": \"" + Escape(region.TitleSide) + "\",");
+                    sb.AppendLine("      \"Collapsed\": " + (region.Collapsed ? "true" : "false") + ",");
                     sb.AppendLine("      \"MaterialPreset\": \"" + Escape(region.MaterialPreset) + "\",");
                     sb.AppendLine("      \"MaterialOpacity\": " + FormatNullableInt(region.MaterialOpacity) + ",");
                     sb.AppendLine("      \"MaterialTint\": " + FormatNullableInt(region.MaterialTint) + ",");
