@@ -26,6 +26,8 @@ namespace GhostDesk
         private readonly StackPanel _timeSection;
         private readonly StackPanel _weekdaySection;
         private readonly StackPanel _intervalSection;
+        private readonly StackPanel _onceDateSection;
+        private readonly DatePickerControl _onceDateInput;
         private readonly WrapPanel _weekdayChoices;
         private readonly Button _browseButton;
         private readonly RadioButton _applicationRadio;
@@ -88,13 +90,14 @@ namespace GhostDesk
                     taskToEdit.ScheduleMode,
                     taskToEdit.Time,
                     taskToEdit.DayOfWeek,
-                    taskToEdit.IntervalMinutes);
+                    taskToEdit.IntervalMinutes,
+                    taskToEdit.OnceDate);
 
             Title = _dialogTitle;
             Width = 520;
-            Height = 580;
+            Height = 620;
             MinWidth = 480;
-            MinHeight = 530;
+            MinHeight = 560;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ShowInTaskbar = false;
             ResizeMode = ResizeMode.NoResize;
@@ -266,6 +269,22 @@ namespace GhostDesk
             timingGrid.Children.Add(countdownSection);
             content.Children.Add(timingGrid);
 
+            _onceDateSection = new StackPanel();
+            _onceDateSection.Margin = new Thickness(0, 8, 0, 0);
+            _onceDateSection.Children.Add(CreateSectionLabel("执行日期"));
+            _onceDateInput = new DatePickerControl();
+            _onceDateInput.Width = 208;
+            _onceDateInput.Margin = new Thickness(0, 6, 0, 0);
+            _onceDateSection.Children.Add(_onceDateInput);
+            TextBlock dateHint = GlassTheme.CreateText(
+                "默认自动：这个时间今天还没过就是今天，已经过了就明天。点右侧日历图标可以自己选日期。",
+                11,
+                true);
+            dateHint.TextWrapping = TextWrapping.Wrap;
+            dateHint.Margin = new Thickness(0, 6, 0, 0);
+            _onceDateSection.Children.Add(dateHint);
+            content.Children.Add(_onceDateSection);
+
             _errorText = GlassTheme.CreateText("", 12, false);
             _errorText.Foreground = GlassTheme.DangerBrush;
             _errorText.TextWrapping = TextWrapping.Wrap;
@@ -421,17 +440,19 @@ namespace GhostDesk
 
         private void UpdateScheduleFields()
         {
-            if (_timeSection == null)
+            if (_timeSection == null || _onceDateSection == null)
             {
                 return;
             }
 
             bool interval = _intervalRadio.IsChecked == true;
             bool weekly = _weeklyRadio.IsChecked == true;
+            bool once = _onceRadio.IsChecked == true;
             _timeSection.Visibility = Visibility.Visible;
             _timeLabel.Text = interval ? "首次执行时间" : "执行时间";
             _weekdaySection.Visibility = weekly ? Visibility.Visible : Visibility.Collapsed;
             _intervalSection.Visibility = interval ? Visibility.Visible : Visibility.Collapsed;
+            _onceDateSection.Visibility = once ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void Browse_Click(object sender, RoutedEventArgs e)
@@ -531,18 +552,35 @@ namespace GhostDesk
                 return;
             }
 
+            bool onceMode = string.Equals(
+                mode,
+                ScheduledTaskConfig.ModeOnce,
+                StringComparison.Ordinal);
+            string onceDate = onceMode ? (_onceDateInput.Value ?? "") : "";
             string scheduleSignature = BuildScheduleSignature(
                 mode,
                 normalizedTime,
                 _selectedDay,
-                interval);
+                interval,
+                onceDate);
             bool scheduleChanged = _editingTask == null ||
                 !string.Equals(
                     scheduleSignature,
                     _originalScheduleSignature,
                     StringComparison.Ordinal);
             DateTime firstRunUtc;
-            if (!scheduleChanged &&
+            if (onceMode)
+            {
+                // 一次性任务每次保存都重新判定日期：
+                // 自选了日期就按所选日期，没选就今天（时间已过则明天）。
+                firstRunUtc = ScheduledTaskRunner.CalculateFirstRunUtc(
+                    mode,
+                    normalizedTime,
+                    _selectedDay,
+                    onceDate,
+                    DateTime.Now);
+            }
+            else if (!scheduleChanged &&
                 DateTime.TryParse(
                     _editingTask.FirstRunUtc,
                     CultureInfo.InvariantCulture,
@@ -560,6 +598,21 @@ namespace GhostDesk
                     DateTime.Now);
             }
 
+            bool firstRunMoved = true;
+            if (_editingTask != null)
+            {
+                DateTime previousFirstRun;
+                if (DateTime.TryParse(
+                        _editingTask.FirstRunUtc,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind,
+                        out previousFirstRun))
+                {
+                    firstRunMoved = Math.Abs(
+                        (previousFirstRun.ToUniversalTime() - firstRunUtc).TotalSeconds) >= 1;
+                }
+            }
+
             ScheduledTaskConfig task = new ScheduledTaskConfig();
             task.Id = _editingTask == null || string.IsNullOrWhiteSpace(_editingTask.Id)
                 ? Guid.NewGuid().ToString("N")
@@ -569,6 +622,7 @@ namespace GhostDesk
             task.Target = target;
             task.ScheduleMode = mode;
             task.Time = normalizedTime;
+            task.OnceDate = onceDate;
             task.DayOfWeek = _selectedDay;
             task.IntervalMinutes = interval;
             task.CountdownSeconds = countdown;
@@ -580,9 +634,10 @@ namespace GhostDesk
             task.FirstRunUtc = firstRunUtc.ToString(
                 "o",
                 CultureInfo.InvariantCulture);
-            task.LastRunUtc = _editingTask == null || scheduleChanged
-                ? ""
-                : (_editingTask.LastRunUtc ?? "");
+            bool keepLastRun = _editingTask != null &&
+                !scheduleChanged &&
+                !(onceMode && firstRunMoved);
+            task.LastRunUtc = keepLastRun ? (_editingTask.LastRunUtc ?? "") : "";
             ResultTask = task;
             CloseWithResult(true);
         }
@@ -600,6 +655,8 @@ namespace GhostDesk
             {
                 _timeInput.Value = _editingTask.Time;
             }
+
+            _onceDateInput.Value = _editingTask.OnceDate ?? "";
 
             if (_editingTask.IntervalMinutes >= 1)
             {
@@ -703,12 +760,14 @@ namespace GhostDesk
             string mode,
             string time,
             int dayOfWeek,
-            int intervalMinutes)
+            int intervalMinutes,
+            string onceDate)
         {
             return (mode ?? "") + "|" +
                 (time ?? "") + "|" +
                 dayOfWeek.ToString(CultureInfo.InvariantCulture) + "|" +
-                intervalMinutes.ToString(CultureInfo.InvariantCulture);
+                intervalMinutes.ToString(CultureInfo.InvariantCulture) + "|" +
+                (onceDate ?? "");
         }
 
         private void ShowError(string message)

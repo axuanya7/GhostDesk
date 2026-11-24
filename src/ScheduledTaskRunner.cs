@@ -425,10 +425,43 @@ namespace GhostDesk
             return candidate;
         }
 
+        /// <summary>yyyy-MM-dd 格式的一次性日期；空或非法返回 false。</summary>
+        internal static bool TryParseOnceDate(string value, out DateTime date)
+        {
+            date = DateTime.MinValue;
+            string text = (value ?? "").Trim();
+            if (text.Length == 0)
+            {
+                return false;
+            }
+
+            return DateTime.TryParseExact(
+                text,
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out date);
+        }
+
         internal static DateTime CalculateFirstRunUtc(
             string mode,
             string time,
             int dayOfWeek,
+            DateTime nowLocal)
+        {
+            return CalculateFirstRunUtc(mode, time, dayOfWeek, "", nowLocal);
+        }
+
+        /// <summary>
+        /// 计算首次执行时间（UTC）。
+        /// onceDate 为一次性任务自选的 yyyy-MM-dd；为空表示自动：
+        /// 该时间今天还没过就是今天，已经过了就顺延到明天。
+        /// </summary>
+        internal static DateTime CalculateFirstRunUtc(
+            string mode,
+            string time,
+            int dayOfWeek,
+            string onceDate,
             DateTime nowLocal)
         {
             DateTime parsedTime;
@@ -442,11 +475,21 @@ namespace GhostDesk
                 parsedTime = nowLocal.Date.AddHours(9);
             }
 
-            DateTime firstRun = nowLocal.Date.Add(parsedTime.TimeOfDay);
-            if (string.Equals(
-                    mode,
-                    ScheduledTaskConfig.ModeWeekly,
-                    StringComparison.Ordinal))
+            bool weekly = string.Equals(
+                mode,
+                ScheduledTaskConfig.ModeWeekly,
+                StringComparison.Ordinal);
+            bool once = string.Equals(
+                mode,
+                ScheduledTaskConfig.ModeOnce,
+                StringComparison.Ordinal);
+
+            DateTime pickedDate = DateTime.MinValue;
+            bool hasPickedDate = once && TryParseOnceDate(onceDate, out pickedDate);
+            DateTime baseDate = hasPickedDate ? pickedDate.Date : nowLocal.Date;
+
+            DateTime firstRun = baseDate.Add(parsedTime.TimeOfDay);
+            if (weekly)
             {
                 int delta = (dayOfWeek - (int)nowLocal.DayOfWeek + 7) % 7;
                 firstRun = firstRun.AddDays(delta);
@@ -454,13 +497,19 @@ namespace GhostDesk
 
             if (firstRun <= nowLocal)
             {
-                firstRun = firstRun.AddDays(
-                    string.Equals(
-                        mode,
-                        ScheduledTaskConfig.ModeWeekly,
-                        StringComparison.Ordinal)
-                        ? 7
-                        : 1);
+                if (hasPickedDate)
+                {
+                    int guard = 0;
+                    while (firstRun <= nowLocal && guard < 4000)
+                    {
+                        firstRun = firstRun.AddDays(1);
+                        guard++;
+                    }
+                }
+                else
+                {
+                    firstRun = firstRun.AddDays(weekly ? 7 : 1);
+                }
             }
 
             return firstRun.ToUniversalTime();

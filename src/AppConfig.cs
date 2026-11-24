@@ -70,6 +70,13 @@ namespace GhostDesk
         [DataMember]
         public string Time { get; set; }
 
+        /// <summary>
+        /// 一次性任务的指定日期（yyyy-MM-dd）。为空表示自动：
+        /// 该时间今天还没过就今天，已经过了就明天。
+        /// </summary>
+        [DataMember]
+        public string OnceDate { get; set; }
+
         [DataMember]
         public int DayOfWeek { get; set; }
 
@@ -570,6 +577,7 @@ namespace GhostDesk
                     sb.AppendLine("      \"Target\": \"" + Escape(task.Target) + "\",");
                     sb.AppendLine("      \"ScheduleMode\": \"" + Escape(task.ScheduleMode) + "\",");
                     sb.AppendLine("      \"Time\": \"" + Escape(task.Time) + "\",");
+                    sb.AppendLine("      \"OnceDate\": \"" + Escape(task.OnceDate) + "\",");
                     sb.AppendLine("      \"DayOfWeek\": " + task.DayOfWeek.ToString(CultureInfo.InvariantCulture) + ",");
                     sb.AppendLine("      \"IntervalMinutes\": " + task.IntervalMinutes.ToString(CultureInfo.InvariantCulture) + ",");
                     sb.AppendLine("      \"CountdownSeconds\": " + task.CountdownSeconds.ToString(CultureInfo.InvariantCulture) + ",");
@@ -1540,6 +1548,20 @@ namespace GhostDesk
                     }
                 }
 
+                string onceDate = (task.OnceDate ?? "").Trim();
+                if (onceDate.Length > 0)
+                {
+                    DateTime parsedOnceDate;
+                    onceDate = ScheduledTaskRunner.TryParseOnceDate(onceDate, out parsedOnceDate)
+                        ? parsedOnceDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                        : "";
+                }
+                if (!string.Equals(onceDate, task.OnceDate ?? "", StringComparison.Ordinal))
+                {
+                    task.OnceDate = onceDate;
+                    changed = true;
+                }
+
                 int day = Math.Max(0, Math.Min(6, task.DayOfWeek));
                 if (day != task.DayOfWeek)
                 {
@@ -1629,6 +1651,22 @@ namespace GhostDesk
                     {
                         DateTime localBaseline = baseline.ToLocalTime();
                         firstRun = localBaseline.Date.Add(time.TimeOfDay);
+                        DateTime pickedDate;
+                        if (string.Equals(
+                                task.ScheduleMode,
+                                ScheduledTaskConfig.ModeOnce,
+                                StringComparison.Ordinal) &&
+                            ScheduledTaskRunner.TryParseOnceDate(task.OnceDate, out pickedDate))
+                        {
+                            firstRun = pickedDate.Date.Add(time.TimeOfDay);
+                            int guard = 0;
+                            while (firstRun < localBaseline && guard < 4000)
+                            {
+                                firstRun = firstRun.AddDays(1);
+                                guard++;
+                            }
+                        }
+
                         if (string.Equals(
                                 task.ScheduleMode,
                                 ScheduledTaskConfig.ModeWeekly,
