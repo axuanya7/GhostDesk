@@ -1,17 +1,17 @@
 # STATE —— 唯一事实源
 
-最后更新：2026-11-24 13:59 by 定时任务与 STATE（本会话）
+最后更新：2026-11-24 14:05 by 定时任务与 STATE（本会话）
 
 > 规矩：动任何文件之前先读这份；要走的时候把这份补上。多个会话同时开的时候，靠下面的「占用」和「会话登记」两张表不打架。
 
 ## 现在在做什么
 
-定时启动的「一次性」改造已完成并编译运行：保存时按当前时间自动判定今天/明天（时间已过就明天），并新增「执行日期」自选日历（存 `OnceDate`，空 = 自动）。`bin\GhostDesk.exe` 已重建（2026-11-24 13:58，734720 字节），旧进程 8492 已结束、新进程 4560 在跑，**等用户点开设置页验收**。Git 仍未提交。
+定时启动的「一次性」改造已完成并发布：保存时按当前时间自动判定今天/明天（时间已过就明天），并新增「执行日期」自选日历（存 `OnceDate`，空 = 自动）。已推 `main`（commit `52fbff5 Release GhostDesk v1.4.7`）、打标签 `v1.4.7`、发布 GitHub Release（含 `GhostDesk-Setup-1.4.7.exe` 与 `GhostDesk-v1.4.7-win-x64.zip`）。本机跑的还是 1.4.6（进程 4560），**等用户在软件里点「检查更新」自己升到 1.4.7 并验收**。
 
 ## 下次从哪继续
 
-- 上次停在哪：一次性日期改造写完、编译通过、新 exe 已启动（进程 4560），未提交 Git。
-- 下次先执行什么：等用户验收设置页 → 定时启动，确认「执行日期」补丁与日历弹层的样子；要发包就把 `src\AppInfo.cs` 的 `Version` 改成新号，再 `.\build.ps1`，最后 `.\build-installer.ps1`。
+- 上次停在哪：`v1.4.7` 已发布（tag `v1.4.7`，commit `52fbff5`，Release 上两个资产都在），本机装着 1.4.6 等用户点更新。
+- 下次先执行什么：等用户点「检查更新」升到 1.4.7 后验收「执行日期」；下一次发包同样走「改 `src\AppInfo.cs` 的 `Version` → 更新 `README.md` 两条下载链接 → 在仓库外副本跑 `.\build-installer.ps1`（`bin\GhostDesk.exe` 常被运行中进程占用）→ commit / tag / push → `gh release create` 传 dist 里两个文件」。
 - 不预期换哪条路：不引入 `.csproj` / MSBuild，继续用 `build.ps1` 里的 `csc.exe` 单条命令编译；不把 `src` 拆成多项目；不改成「搬动用户文件」的收纳方式（见「已知的坑」第一条）。
 
 ## 占用（同一块地只许一个会话动，改完就删这一整行）
@@ -23,19 +23,18 @@
 
 | 会话 | 管什么 | 最后活动 | 备注 |
 |---|---|---|---|
-| 定时任务与 STATE（本会话） | `src\ScheduledTask*.cs`、`AppConfig.cs`、`STATE.md` | 2026-11-24 13:59 | 一次性日期改造 + 新建本文件；未提交 Git |
+| 定时任务与 STATE（本会话） | `src\ScheduledTask*.cs`、`AppConfig.cs`、`STATE.md` | 2026-11-24 14:05 | 一次性日期改造 + 新建本文件 + 发布 v1.4.7 |
 
 「未登记等于没在跑」这条是有意的：我看不到别人的会话，唯一能确认的方式就是它在上面留过一行。
 
 ## 待办
 
-- 等用户验收「执行日期」（一次性）：底部 `自动（今天 / 明天）` 与实际今天/明天是否对得上，日历弹层能不能选到想要的日期。
-- 验收通过后再决定要不要发 `v1.4.7`（改 `src\AppInfo.cs` → `.\build.ps1` → `.\build-installer.ps1`）。
-- 验收通过后提交 Git（`STATE.md` 是新增文件，别 `git add -A` 带上 `.backups/`）。
+- 等用户点「检查更新」把本机升到 1.4.7，再验收「执行日期」：`自动（今天 / 明天）` 与实际今天/明天是否对得上，日历弹层能不能选到想要的日期。
 - 旧的过期一次性任务（设置页里「抢刀 · 2026-11-01 11:55」那条）需要重新打开保存一次才会滚到新日期，保存后仍是「已暂停」，要手动点「启用」。
 
 ## 最近改动
 
+- 2026-11-24 14:04：发布 `v1.4.7`。`src\AppInfo.cs` 版本号 1.4.6→1.4.7，`README.md` 两条下载链接换成 1.4.7；commit `52fbff5` 推 `main`，打 tag `v1.4.7`，`gh release create` 传了 `GhostDesk-Setup-1.4.7.exe`(2584699 B) 与 `GhostDesk-v1.4.7-win-x64.zip`(430059 B)。安装包是在仓库外副本（`%TEMP%\GhostDesk-rel-*`）里编的，因为 `bin\GhostDesk.exe` 被运行中的 1.4.6 占着。
 - 2026-11-24 13:58：定时启动「一次性」改造。`ScheduledTaskConfig` 新增 `OnceDate`（`yyyy-MM-dd`，空 = 自动）；`ScheduledTaskWindow` 增加「执行日期」行 + 自选日历，一次性任务**每次保存都重算**首次执行时间；新增 `src\DatePickerControl.cs`；`ScheduledTaskRunner.CalculateFirstRunUtc` 增加带日期的重载与 `TryParseOnceDate`；`AppConfig` 增加该字段的序列化与规范化。编译 0 错误，`bin\GhostDesk.exe` 已更新。
 - 2026-11-24：新增本文件 `STATE.md`（多会话协作规范）。
 - 2026-10-29 20:17：`README.md` 更新（v1.4.6 下载链接与说明）。
